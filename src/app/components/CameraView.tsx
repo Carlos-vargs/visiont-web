@@ -2,7 +2,14 @@ import { useState, useEffect, useRef } from "react";
 import { AppHeader } from "./AppHeader";
 import { BottomNav } from "./BottomNav";
 import { motion, AnimatePresence } from "motion/react";
-import { Flashlight, ZoomIn, Info, Mic, MicOff, MessageSquare } from "lucide-react";
+import {
+  Flashlight,
+  ZoomIn,
+  Info,
+  Mic,
+  MicOff,
+  MessageSquare,
+} from "lucide-react";
 import { useCamera } from "../hooks/useCamera";
 import { useAudio } from "../hooks/useAudio";
 import { useGemini } from "../hooks/useGemini";
@@ -29,27 +36,24 @@ type DetectionResult = {
   h: number;
 };
 
-const mockDetections: BoundingBox[] = [
-  { id: 1, label: "Silla", distance: "1.2 m", x: 15, y: 45, w: 28, h: 38, confidence: 97 },
-  { id: 2, label: "Mesa", distance: "1.8 m", x: 50, y: 52, w: 35, h: 28, confidence: 94 },
-  { id: 3, label: "Persona", distance: "3.4 m", x: 62, y: 10, w: 22, h: 55, confidence: 99 },
-  { id: 4, label: "Puerta", distance: "4.1 m", x: 6, y: 8, w: 18, h: 72, confidence: 91 },
-];
-
-const PROFILE_IMAGE = "https://images.unsplash.com/photo-1577565177023-d0f29c354b69?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxwZXJzb24lMjBwb3J0cmFpdCUyMGNsb3NlJTIwdXAlMjBwcm9maWxlfGVufDF8fHx8MTc3NTUyODg1Mnww&ixlib=rb-4.1.0&q=80&w=400";
+const PROFILE_IMAGE =
+  "https://images.unsplash.com/photo-1577565177023-d0f29c354b69?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxwZXJzb24lMjBwb3J0cmFpdCUyMGNsb3NlJTIwdXAlMjBwcm9maWxlfGVufDF8fHx8MTc3NTUyODg1Mnww&ixlib=rb-4.1.0&q=80&w=400";
 
 export function CameraView() {
   const [flashOn, setFlashOn] = useState(false);
   const [activeBoxes, setActiveBoxes] = useState<BoundingBox[]>([]);
   const [scanning, setScanning] = useState(true);
   const [scanLine, setScanLine] = useState(0);
-  const [geminiMode, setGeminiMode] = useState<"none" | "voice" | "text">("none");
+  const [geminiMode, setGeminiMode] = useState<"none" | "voice" | "text">(
+    "none",
+  );
   const [showFeedback, setShowFeedback] = useState(false);
   const [feedbackText, setFeedbackText] = useState("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [cameraEnabled, setCameraEnabled] = useState(false);
 
-  const captureIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const captureIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
+    null,
+  );
 
   // Hooks
   const {
@@ -98,22 +102,14 @@ export function CameraView() {
     return () => clearInterval(scanInterval);
   }, []);
 
-  // Start camera on mount
-  useEffect(() => {
-    if (!cameraEnabled) return;
-
-    startCamera().then(() => {
-      // Start periodic frame capture for Gemini
-      if (geminiMode !== "none") {
-        startGeminiAnalysis();
-      }
-    });
-
-    return () => {
-      stopCamera();
-      stopGeminiAnalysis();
-    };
-  }, [cameraEnabled, geminiMode]);
+// Camera only activates/deactivates on mount/unmount
+useEffect(() => {
+  startCamera();
+  return () => {
+    stopCamera();
+    stopGeminiAnalysis();
+  };
+}, []);
 
   const startGeminiAnalysis = () => {
     captureIntervalRef.current = setInterval(async () => {
@@ -124,15 +120,16 @@ export function CameraView() {
       try {
         const result = await sendImageWithPrompt(
           frame,
-          "Describe lo que ves en esta imagen de la cámara. Identifica objetos, personas, texto y obstáculos. Proporciona distancias aproximadas."
+          "Describe lo que ves en esta imagen de la cámara. Identifica objetos, personas, texto y obstáculos. Proporciona distancias aproximadas.",
         );
 
         setFeedbackText(result.feedback);
         setShowFeedback(true);
 
-        // Convert detections to bounding boxes
+        // Convert detections to bounding boxes (ensure unique ids for React keys)
+        const now = Date.now();
         const boxes: BoundingBox[] = result.detections.map((det, idx) => ({
-          id: idx + 1,
+          id: now + idx,
           ...det,
           confidence: det.confidence || 90,
         }));
@@ -160,20 +157,10 @@ export function CameraView() {
     }
   };
 
-  const toggleCamera = async () => {
-    if (cameraEnabled) {
-      stopCamera();
-      stopGeminiAnalysis();
-      setCameraEnabled(false);
-    } else {
-      setCameraEnabled(true);
-    }
-  };
-
   const toggleGeminiMode = () => {
     if (geminiMode === "none") {
       setGeminiMode("voice");
-      if (cameraEnabled) {
+      if (cameraPermission && cameraActive) {
         startGeminiAnalysis();
       }
     } else if (geminiMode === "voice") {
@@ -190,21 +177,13 @@ export function CameraView() {
     }
   };
 
-  // Stagger appearance of bounding boxes (mock data for initial display)
-  useEffect(() => {
-    const all = mockDetections;
-    all.forEach((box, i) => {
-      setTimeout(() => {
-        setActiveBoxes((prev) => [...prev, box]);
-      }, 600 + i * 300);
-    });
-    setTimeout(() => setScanning(false), 2200);
-  }, []);
-
   return (
     <>
       <AppHeader profileImage={PROFILE_IMAGE} />
-      <div className="flex flex-col flex-1 overflow-hidden pb-20" style={{ background: "#F8FAFC" }}>
+      <div
+        className="flex flex-col flex-1 overflow-hidden pb-20"
+        style={{ background: "#F8FAFC" }}
+      >
         {/* Status bar */}
         <div className="mx-4 mt-3 mb-2 flex gap-2 flex-wrap">
           {/* Info banner */}
@@ -224,7 +203,10 @@ export function CameraView() {
           {geminiMode !== "none" && (
             <div className="bg-emerald-50 border border-emerald-200 rounded-2xl px-3 py-2 flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-              <span style={{ fontSize: "12px" }} className="text-emerald-700 font-medium">
+              <span
+                style={{ fontSize: "12px" }}
+                className="text-emerald-700 font-medium"
+              >
                 {geminiMode === "voice" ? "🎤 Voz activa" : "💬 Texto activo"}
               </span>
               {isAnalyzing && (
@@ -237,23 +219,27 @@ export function CameraView() {
         {/* Camera frame */}
         <div className="mx-4 min-h-[44dvh] flex-1 relative overflow-hidden rounded-3xl bg-slate-800 shadow-md">
           {/* Camera feed or simulated gradient */}
-          {cameraEnabled && cameraActive ? (
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className="absolute inset-0 w-full h-full object-cover"
-            />
-          ) : (
-            <div
-              className="absolute inset-0"
-              style={{
-                background:
-                  "linear-gradient(160deg, #1a2332 0%, #243447 40%, #1c2d3f 70%, #0f1923 100%)",
-              }}
-            />
-          )}
+{cameraActive ? (
+  <video
+    ref={videoRef}
+    autoPlay
+    playsInline
+    muted
+    className="absolute inset-0 w-full h-full object-cover"
+  />
+) : cameraError ? (
+  <div className="absolute inset-0 flex items-center justify-center bg-slate-900 text-white text-center px-4">
+    <span className="text-lg font-semibold">{cameraError}</span>
+  </div>
+) : (
+  <div
+    className="absolute inset-0"
+    style={{
+      background:
+        "linear-gradient(160deg, #1a2332 0%, #243447 40%, #1c2d3f 70%, #0f1923 100%)",
+    }}
+  />
+)}
 
           {/* Subtle grid overlay */}
           <div
@@ -280,27 +266,46 @@ export function CameraView() {
 
           {/* Scan line */}
           <AnimatePresence>
-            {scanning && (
-              <motion.div
-                className="absolute left-0 right-0 h-px z-10"
-                style={{
-                  top: `${scanLine}%`,
-                  background:
-                    "linear-gradient(90deg, transparent, #3B82F6 20%, #60A5FA 50%, #3B82F6 80%, transparent)",
-                  boxShadow: "0 0 8px 2px rgba(59,130,246,0.6)",
-                }}
-              />
-            )}
+             {scanning && cameraActive && (
+               <motion.div
+                 className="absolute left-0 right-0 h-px z-10"
+                 style={{
+                   top: `${scanLine}%`,
+                   background:
+                     "linear-gradient(90deg, transparent, #3B82F6 20%, #60A5FA 50%, #3B82F6 80%, transparent)",
+                   boxShadow: "0 0 8px 2px rgba(59,130,246,0.6)",
+                 }}
+               />
+             )}
           </AnimatePresence>
 
           {/* Corner markers */}
           {[
             { top: "8px", left: "8px", borderTop: true, borderLeft: true },
             { top: "8px", right: "8px", borderTop: true, borderRight: true },
-            { bottom: "8px", left: "8px", borderBottom: true, borderLeft: true },
-            { bottom: "8px", right: "8px", borderBottom: true, borderRight: true },
+            {
+              bottom: "8px",
+              left: "8px",
+              borderBottom: true,
+              borderLeft: true,
+            },
+            {
+              bottom: "8px",
+              right: "8px",
+              borderBottom: true,
+              borderRight: true,
+            },
           ].map((corner, i) => {
-            const { top, left, right, bottom, borderTop, borderLeft, borderRight, borderBottom } = corner;
+            const {
+              top,
+              left,
+              right,
+              bottom,
+              borderTop,
+              borderLeft,
+              borderRight,
+              borderBottom,
+            } = corner;
             return (
               <div
                 key={i}
@@ -323,21 +328,21 @@ export function CameraView() {
           })}
 
           {/* Bounding boxes */}
-          <AnimatePresence>
-            {activeBoxes.map((box) => (
-              <motion.div
-                key={box.id}
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ duration: 0.3 }}
-                className="absolute"
-                style={{
-                  left: `${box.x}%`,
-                  top: `${box.y}%`,
-                  width: `${box.w}%`,
-                  height: `${box.h}%`,
-                }}
-              >
+           <AnimatePresence>
+             {cameraActive && activeBoxes.map((box) => (
+               <motion.div
+                 key={box.id}
+                 initial={{ opacity: 0, scale: 0.9 }}
+                 animate={{ opacity: 1, scale: 1 }}
+                 transition={{ duration: 0.3 }}
+                 className="absolute"
+                 style={{
+                   left: `${box.x}%`,
+                   top: `${box.y}%`,
+                   width: `${box.w}%`,
+                   height: `${box.h}%`,
+                 }}
+               >
                 {/* Dotted border */}
                 <div
                   className="absolute inset-0 rounded-lg"
@@ -365,7 +370,10 @@ export function CameraView() {
                   {box.distance && (
                     <>
                       <span className="w-px h-3 bg-slate-500" />
-                      <span className="text-emerald-400" style={{ fontSize: "9px" }}>
+                      <span
+                        className="text-emerald-400"
+                        style={{ fontSize: "9px" }}
+                      >
                         {box.distance}
                       </span>
                     </>
@@ -402,7 +410,13 @@ export function CameraView() {
                 border: "1px solid rgba(255,255,255,0.15)",
               }}
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill={flashOn ? "#1a1a1a" : "white"} stroke="none">
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill={flashOn ? "#1a1a1a" : "white"}
+                stroke="none"
+              >
                 <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
               </svg>
             </button>
@@ -422,20 +436,26 @@ export function CameraView() {
 
         {/* Detections list */}
         <div className="mx-4 mt-3 mb-2">
-          <p style={{ fontSize: "11px" }} className="text-gray-400 uppercase tracking-wider mb-2 px-1">
+          <p
+            style={{ fontSize: "11px" }}
+            className="text-gray-400 uppercase tracking-wider mb-2 px-1"
+          >
             Objetos detectados
           </p>
-          <div className="flex flex-col gap-1.5">
-            {activeBoxes.slice(0, 3).map((box) => (
-              <motion.div
-                key={box.id}
-                initial={{ opacity: 0, x: -10 }}
-                animate={{ opacity: 1, x: 0 }}
-                className="bg-white rounded-2xl px-4 py-2 flex items-center justify-between shadow-sm border border-gray-100"
-              >
+           <div className="flex flex-col gap-1.5">
+             {cameraActive && activeBoxes.slice(0, 3).map((box) => (
+               <motion.div
+                 key={box.id}
+                 initial={{ opacity: 0, x: -10 }}
+                 animate={{ opacity: 1, x: 0 }}
+                 className="bg-white rounded-2xl px-4 py-2 flex items-center justify-between shadow-sm border border-gray-100"
+               >
                 <div className="flex items-center gap-2">
                   <div className="w-2 h-2 rounded-full bg-blue-400" />
-                  <span style={{ fontSize: "13px" }} className="text-slate-700 font-medium">
+                  <span
+                    style={{ fontSize: "13px" }}
+                    className="text-slate-700 font-medium"
+                  >
                     {box.label}
                   </span>
                 </div>
@@ -454,25 +474,26 @@ export function CameraView() {
 
         {/* Action buttons */}
         <div className="mx-4 mt-2 flex gap-2">
-          {/* Camera toggle */}
-          <button
-            onClick={toggleCamera}
-            className="flex-1 bg-white border border-gray-200 rounded-2xl px-4 py-3 shadow-sm active:bg-gray-50 transition-colors"
-          >
-            <span style={{ fontSize: "13px" }} className="font-medium text-slate-700">
-              {cameraEnabled ? "📷 Apagar cámara" : "📷 Encender cámara"}
-            </span>
-          </button>
-
           {/* Gemini mode toggle */}
           <button
             onClick={toggleGeminiMode}
             className="flex-1 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-2xl px-4 py-3 shadow-md active:opacity-90 transition-opacity"
           >
-            <span style={{ fontSize: "13px" }} className="font-medium flex items-center justify-center gap-2">
+            <span
+              style={{ fontSize: "13px" }}
+              className="font-medium flex items-center justify-center gap-2"
+            >
               {geminiMode === "none" && <>🤖 Activar Gemini</>}
-              {geminiMode === "voice" && <><Mic size={14} /> Modo voz</>}
-              {geminiMode === "text" && <><MessageSquare size={14} /> Modo texto</>}
+              {geminiMode === "voice" && (
+                <>
+                  <Mic size={14} /> Modo voz
+                </>
+              )}
+              {geminiMode === "text" && (
+                <>
+                  <MessageSquare size={14} /> Modo texto
+                </>
+              )}
             </span>
           </button>
         </div>

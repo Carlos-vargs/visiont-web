@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 
 type CameraOptions = {
   width?: number;
@@ -18,41 +18,68 @@ export function useCamera(options: CameraOptions = {}) {
   const [isActive, setIsActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [permissionGranted, setPermissionGranted] = useState(false);
-  
+
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  
+  // Store options in a ref to avoid recreation
+  const optionsRef = useRef({ width, height, facingMode, frameRate });
+  optionsRef.current = { width, height, facingMode, frameRate };
 
   const startCamera = useCallback(async () => {
+    const { width, height, facingMode, frameRate } = optionsRef.current;
+    
     try {
       setError(null);
+      console.log("[useCamera] startCamera called");
 
       // Verificar permisos
-      const permissionStatus = await navigator.permissions.query({
-        name: "camera" as PermissionName,
-      });
-      setPermissionGranted(permissionStatus.state === "granted");
+      let permissionState = "unknown";
+      try {
+        const permissionStatus = await navigator.permissions.query({
+          name: "camera" as PermissionName,
+        });
+        permissionState = permissionStatus.state;
+        console.log("[useCamera] permissions.query result:", permissionState);
+        setPermissionGranted(permissionState === "granted");
+      } catch (err) {
+        console.warn("[useCamera] navigator.permissions.query NOT SUPPORTED or failed.", err);
+        // Continua el flujo, este método no es confiable en todos los navegadores
+      }
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: width },
-          height: { ideal: height },
-          facingMode,
-          frameRate: { ideal: frameRate },
-        },
-        audio: false,
-      });
+      console.log("[useCamera] About to call getUserMedia; current permissionGranted:", permissionState);
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            width: { ideal: width },
+            height: { ideal: height },
+            facingMode,
+            frameRate: { ideal: frameRate },
+          },
+          audio: false,
+        });
+        console.log("[useCamera] getUserMedia success. stream:", stream);
+      } catch (err) {
+        console.error("[useCamera] getUserMedia failed:", err);
+        throw err;
+      }
 
       streamRef.current = stream;
 
-      // Si hay un videoRef conectado, asignar el stream
       if (videoRef.current) {
+        console.log("[useCamera] Assigning stream to videoRef.");
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
+        console.log("[useCamera] videoRef after play():", videoRef.current, videoRef.current.srcObject);
+      } else {
+        console.warn("[useCamera] videoRef.current is null when assigning stream!");
       }
 
       setIsActive(true);
       setPermissionGranted(true);
+      console.log("[useCamera] startCamera finished. isActive:", true, "permissionGranted:", true);
     } catch (err: any) {
       const errorMsg =
         err.name === "NotAllowedError"
@@ -60,19 +87,23 @@ export function useCamera(options: CameraOptions = {}) {
           : err.name === "NotFoundError"
           ? "No se encontró una cámara en este dispositivo."
           : `Error al acceder a la cámara: ${err.message}`;
-      
+      console.error("[useCamera] startCamera error:", errorMsg, err);
       setError(errorMsg);
       setIsActive(false);
+      setPermissionGranted(false);
     }
-  }, [width, height, facingMode, frameRate]);
+  }, []); // Empty deps - uses optionsRef.current
 
   const stopCamera = useCallback(() => {
+    console.log("[useCamera] stopCamera called");
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
+      console.log("[useCamera] Camera stream stopped");
     }
     if (videoRef.current) {
       videoRef.current.srcObject = null;
+      console.log("[useCamera] videoRef.srcObject set to null");
     }
     setIsActive(false);
   }, []);
@@ -127,22 +158,25 @@ export function useCamera(options: CameraOptions = {}) {
     [captureFrame]
   );
 
-  const requestCameraPermission = useCallback(async () => {
-    try {
-      // Intentar obtener acceso a la cámara
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-      });
-      
-      // Detener inmediatamente después de obtener permiso
-      stream.getTracks().forEach((track) => track.stop());
-      setPermissionGranted(true);
-      return true;
-    } catch {
-      setPermissionGranted(false);
-      return false;
-    }
-  }, []);
+const requestCameraPermission = useCallback(async () => {
+  try {
+    console.log("[useCamera] requestCameraPermission called");
+    // Intentar obtener acceso a la cámara
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+    });
+    
+    // Detener inmediatamente después de obtener permiso
+    stream.getTracks().forEach((track) => track.stop());
+    setPermissionGranted(true);
+    console.log("[useCamera] requestCameraPermission success - permission granted");
+    return true;
+  } catch (err) {
+    setPermissionGranted(false);
+    console.error("[useCamera] requestCameraPermission failed", err);
+    return false;
+  }
+}, []);
 
   // Cleanup al desmontar
   useEffect(() => {
@@ -151,7 +185,10 @@ export function useCamera(options: CameraOptions = {}) {
     };
   }, [stopCamera]);
 
-  return {
+  console.log('[useCamera] Hook return:', {isActive, error, permissionGranted, videoRef, streamRef, video: videoRef.current});
+  
+  // Memoize the return value to prevent unnecessary re-renders
+  return useMemo(() => ({
     isActive,
     error,
     permissionGranted,
@@ -161,5 +198,5 @@ export function useCamera(options: CameraOptions = {}) {
     captureFrame,
     captureFrameAtIntervals,
     requestCameraPermission,
-  };
+  }), [isActive, error, permissionGranted, startCamera, stopCamera, captureFrame, captureFrameAtIntervals, requestCameraPermission]);
 }
