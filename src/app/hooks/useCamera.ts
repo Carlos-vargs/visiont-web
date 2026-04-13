@@ -18,10 +18,13 @@ export function useCamera(options: CameraOptions = {}) {
   const [isActive, setIsActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [permissionGranted, setPermissionGranted] = useState(false);
+  const [flashAvailable, setFlashAvailable] = useState(false);
+  const [flashOn, setFlashOn] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const imageCaptureRef = useRef<ImageCapture | null>(null);
   
   // Store options in a ref to avoid recreation
   const optionsRef = useRef({ width, height, facingMode, frameRate });
@@ -66,6 +69,23 @@ export function useCamera(options: CameraOptions = {}) {
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
+
+        // Initialize ImageCapture for flash control
+        const videoTrack = stream.getVideoTracks()[0];
+        if (videoTrack && typeof ImageCapture !== "undefined") {
+          imageCaptureRef.current = new ImageCapture(videoTrack);
+
+          // Check if flash is available
+          try {
+            const photoSettings = await imageCaptureRef.current.getPhotoSettings();
+            setFlashAvailable(photoSettings?.fillLightMode?.includes("flash") || false);
+          } catch {
+            // getPhotoSettings not supported, try track capabilities
+            const capabilities = videoTrack.getCapabilities();
+            const hasTorch = (capabilities as any).torch || false;
+            setFlashAvailable(hasTorch);
+          }
+        }
       } else {
         console.warn("[useCamera] videoRef.current is null when assigning stream! Video element must be rendered in DOM.");
       }
@@ -94,8 +114,43 @@ export function useCamera(options: CameraOptions = {}) {
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
+    imageCaptureRef.current = null;
     setIsActive(false);
+    setFlashAvailable(false);
+    setFlashOn(false);
   }, []);
+
+  // Toggle flash on/off
+  const toggleFlash = useCallback(async () => {
+    if (!imageCaptureRef.current) {
+      console.warn("[useCamera] ImageCapture not available, cannot toggle flash");
+      return false;
+    }
+
+    try {
+      const videoTrack = streamRef.current?.getVideoTracks()[0];
+      if (!videoTrack) return false;
+
+      const newFlashState = !flashOn;
+
+      // Method 1: Apply torch constraint directly to the video track
+      const capabilities = videoTrack.getCapabilities() as any;
+      if ("torch" in capabilities) {
+        await videoTrack.applyConstraints({
+          advanced: [{ torch: newFlashState } as any],
+        });
+        setFlashOn(newFlashState);
+        return newFlashState;
+      }
+
+      // Method 2: Try ImageCapture (less reliable for continuous torch)
+      console.warn("[useCamera] Torch constraint not supported on this device");
+      return false;
+    } catch (err) {
+      console.error("[useCamera] Error toggling flash:", err);
+      return false;
+    }
+  }, [flashOn]);
 
   const captureFrame = useCallback((): string | null => {
     if (!videoRef.current) {
@@ -176,11 +231,14 @@ const requestCameraPermission = useCallback(async () => {
     isActive,
     error,
     permissionGranted,
+    flashAvailable,
+    flashOn,
     videoRef,
     startCamera,
     stopCamera,
+    toggleFlash,
     captureFrame,
     captureFrameAtIntervals,
     requestCameraPermission,
-  }), [isActive, error, permissionGranted, startCamera, stopCamera, captureFrame, captureFrameAtIntervals, requestCameraPermission]);
+  }), [isActive, error, permissionGranted, flashAvailable, flashOn, startCamera, stopCamera, toggleFlash, captureFrame, captureFrameAtIntervals, requestCameraPermission]);
 }

@@ -30,11 +30,9 @@ type DetectionResult = {
 };
 
 export function CameraView() {
-  const [flashOn, setFlashOn] = useState(false);
   const [activeBoxes, setActiveBoxes] = useState<BoundingBox[]>([]);
   const [scanning, setScanning] = useState(true);
   const [scanLine, setScanLine] = useState(0);
-  const [isGeminiActive, setIsGeminiActive] = useState(false);
   const [showFeedback, setShowFeedback] = useState(false);
   const [feedbackText, setFeedbackText] = useState("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -50,9 +48,12 @@ export function CameraView() {
     isActive: cameraActive,
     error: cameraError,
     permissionGranted: cameraPermission,
+    flashAvailable,
+    flashOn,
     videoRef,
     startCamera,
     stopCamera,
+    toggleFlash,
     captureFrame,
   } = useCamera({
     width: 1280,
@@ -197,7 +198,6 @@ export function CameraView() {
     // Reset states
     isAnalysisInProgressRef.current = false;
     setIsAnalyzing(false);
-    setIsGeminiActive(false);
   }, []);
 
   const handleSpeakFeedback = () => {
@@ -478,35 +478,28 @@ export function CameraView() {
               ))}
           </AnimatePresence>
 
-          {/* Flash overlay */}
-          {flashOn && (
-            <div className="absolute inset-0 bg-yellow-50/10 pointer-events-none" />
-          )}
-
           {/* Camera controls overlay */}
           <div className="absolute bottom-3 right-3 flex flex-col gap-2">
-            <button
-              onClick={() => setFlashOn((f) => !f)}
-              aria-label={flashOn ? "Apagar linterna" : "Encender linterna"}
-              className="w-9 h-9 rounded-full flex items-center justify-center transition-all"
-              style={{
-                background: flashOn
-                  ? "rgba(251,191,36,0.9)"
-                  : "rgba(15,23,42,0.6)",
-                backdropFilter: "blur(4px)",
-                border: "1px solid rgba(255,255,255,0.15)",
-              }}
-            >
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill={flashOn ? "#1a1a1a" : "white"}
-                stroke="none"
+            {/* Flash button - only shown if available */}
+            {flashAvailable && (
+              <button
+                onClick={toggleFlash}
+                aria-label={flashOn ? "Apagar linterna" : "Encender linterna"}
+                className="w-9 h-9 rounded-full flex items-center justify-center transition-all"
+                style={{
+                  background: flashOn
+                    ? "rgba(251,191,36,0.9)"
+                    : "rgba(15,23,42,0.6)",
+                  backdropFilter: "blur(4px)",
+                  border: "1px solid rgba(255,255,255,0.15)",
+                }}
               >
-                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-              </svg>
-            </button>
+                <Flashlight
+                  size={16}
+                  className={flashOn ? "text-slate-900" : "text-white"}
+                />
+              </button>
+            )}
             <button
               aria-label="Zoom"
               className="w-9 h-9 rounded-full flex items-center justify-center"
