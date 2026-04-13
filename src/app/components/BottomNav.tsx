@@ -5,7 +5,7 @@ const navItems = [
   {
     path: "/",
     label: "Visor",
-    icon: Mic,
+    icon: Camera,
     ariaLabel: "Abrir asistente de voz y camara",
   },
   {

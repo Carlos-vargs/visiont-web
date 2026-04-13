@@ -10,11 +10,7 @@ const viewTitles: Record<string, string> = {
   "/settings": "Ajustes",
 };
 
-interface AppHeaderProps {
-  profileImage: string;
-}
-
-export function AppHeader({ profileImage }: AppHeaderProps) {
+export function AppHeader() {
   const location = useLocation();
   const navigate = useNavigate();
   const title = viewTitles[location.pathname] ?? "VisionAI";
@@ -52,18 +48,6 @@ export function AppHeader({ profileImage }: AppHeaderProps) {
           {title}
         </h1>
       </div>
-
-      {/* Right: profile */}
-      <button
-        aria-label="Perfil de usuario"
-        className="w-9 h-9 rounded-full overflow-hidden border-2 border-white shadow-md active:opacity-80 transition-opacity"
-      >
-        <ImageWithFallback
-          src={profileImage}
-          alt="Foto de perfil"
-          className="w-full h-full object-cover"
-        />
-      </button>
     </header>
   );
 }

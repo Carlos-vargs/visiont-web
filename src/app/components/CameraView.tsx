@@ -29,9 +29,6 @@ type DetectionResult = {
   h: number;
 };
 
-const PROFILE_IMAGE =
-  "https://images.unsplash.com/photo-1577565177023-d0f29c354b69?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxwZXJzb24lMjBwb3J0cmFpdCUyMGNsb3NlJTIwdXAlMjBwcm9maWxlfGVufDF8fHx8MTc3NTUyODg1Mnww&ixlib=rb-4.1.0&q=80&w=400";
-
 export function CameraView() {
   const [flashOn, setFlashOn] = useState(false);
   const [activeBoxes, setActiveBoxes] = useState<BoundingBox[]>([]);
@@ -279,7 +276,7 @@ export function CameraView() {
 
   return (
     <>
-      <AppHeader profileImage={PROFILE_IMAGE} />
+      <AppHeader />
       <div
         className="flex flex-col flex-1 overflow-hidden pb-20"
         style={{ background: "#F8FAFC" }}
