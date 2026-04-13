@@ -295,41 +295,6 @@ export function CameraView() {
               <span className="ml-auto w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
             )}
           </div>
-
-          {/* Analyzing indicator with cancel button */}
-          {isAnalyzing && (
-            <div className="bg-amber-50 border border-amber-200 rounded-2xl px-3 py-2 flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-              <span
-                style={{ fontSize: "12px" }}
-                className="text-amber-700 font-medium"
-              >
-                🔍 Analizando...
-              </span>
-              <span className="w-3 h-3 border-2 border-amber-500 border-t-transparent rounded-full animate-spin" />
-              <button
-                onClick={cancelAnalysis}
-                className="ml-2 text-amber-600 hover:text-amber-800 font-medium"
-                style={{ fontSize: "11px" }}
-                aria-label="Cancelar análisis"
-              >
-                Cancelar
-              </button>
-            </div>
-          )}
-
-          {/* Listening indicator */}
-          {isListening && !isAnalyzing && (
-            <div className="bg-blue-50 border border-blue-200 rounded-2xl px-3 py-2 flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
-              <span
-                style={{ fontSize: "12px" }}
-                className="text-blue-700 font-medium"
-              >
-                🎤 Escuchando...
-              </span>
-            </div>
-          )}
         </div>
 
         {/* Camera frame */}
@@ -594,9 +559,9 @@ export function CameraView() {
         <div className="flex flex-col items-center pb-6 pt-2">
           <p style={{ fontSize: "12px" }} className="text-gray-400 mb-3">
             {isAnalyzing
-              ? "Toca para cancelar"
+              ? "Analizando... Toca para cancelar"
               : isListening
-                ? "Toca para analizar"
+                ? "Escuchando... Toca para analizar"
                 : "Toca para activar Gemini"}
           </p>
 

@@ -15,12 +15,12 @@ const navItems = [
     isSOS: true,
     ariaLabel: "Botón de emergencia SOS",
   },
-  {
-    path: "/settings",
-    label: "Ajustes",
-    icon: Settings,
-    ariaLabel: "Abrir ajustes",
-  },
+  // {
+  //   path: "/settings",
+  //   label: "Ajustes",
+  //   icon: Settings,
+  //   ariaLabel: "Abrir ajustes",
+  // },
 ];
 
 export function BottomNav() {
