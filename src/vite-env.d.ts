@@ -19,6 +19,11 @@ interface ImageCapture {
   }): Promise<Blob>;
 }
 
+/*** Improved MediaTrackCapabilities for torch/flash support ***/
+interface MediaTrackCapabilities {
+  torch?: boolean | boolean[];
+}
+
 declare var ImageCapture: {
   prototype: ImageCapture;
   new(track: MediaStreamTrack): ImageCapture;

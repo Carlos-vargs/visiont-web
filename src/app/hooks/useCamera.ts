@@ -71,21 +71,18 @@ export function useCamera(options: CameraOptions = {}) {
         await videoRef.current.play();
 
         // Initialize ImageCapture for flash control
-        const videoTrack = stream.getVideoTracks()[0];
-        if (videoTrack && typeof ImageCapture !== "undefined") {
-          imageCaptureRef.current = new ImageCapture(videoTrack);
+         const videoTrack = stream.getVideoTracks()[0];
+         if (videoTrack && typeof ImageCapture !== "undefined") {
+           imageCaptureRef.current = new ImageCapture(videoTrack);
 
-          // Check if flash is available
-          try {
-            const photoSettings = await imageCaptureRef.current.getPhotoSettings();
-            setFlashAvailable(photoSettings?.fillLightMode?.includes("flash") || false);
-          } catch {
-            // getPhotoSettings not supported, try track capabilities
-            const capabilities = videoTrack.getCapabilities();
-            const hasTorch = (capabilities as any).torch || false;
-            setFlashAvailable(hasTorch);
-          }
-        }
+           // Correctly check if torch (flash) is available (live video flash)
+           const capabilities = videoTrack.getCapabilities() as any;
+           const hasTorch = "torch" in capabilities &&
+             (Array.isArray(capabilities.torch)
+               ? capabilities.torch.includes(true)
+               : !!capabilities.torch);
+           setFlashAvailable(hasTorch);
+         }
       } else {
         console.warn("[useCamera] videoRef.current is null when assigning stream! Video element must be rendered in DOM.");
       }
