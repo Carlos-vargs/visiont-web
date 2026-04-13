@@ -299,20 +299,25 @@ export function CameraView() {
 
         {/* Camera frame */}
         <div className="mx-4 min-h-[44dvh] flex-1 relative overflow-hidden rounded-3xl bg-slate-800 shadow-md">
-          {/* Camera feed or simulated gradient */}
-          {cameraActive ? (
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className="absolute inset-0 w-full h-full object-cover"
-            />
-          ) : cameraError ? (
+          {/* Camera feed - always rendered for videoRef to exist */}
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className="absolute inset-0 w-full h-full object-cover"
+            style={{ display: cameraActive ? "block" : "none" }}
+          />
+
+          {/* Error overlay */}
+          {cameraError && (
             <div className="absolute inset-0 flex items-center justify-center bg-slate-900 text-white text-center px-4">
               <span className="text-lg font-semibold">{cameraError}</span>
             </div>
-          ) : (
+          )}
+
+          {/* Gradient background when camera not active */}
+          {!cameraActive && !cameraError && (
             <div
               className="absolute inset-0"
               style={{
