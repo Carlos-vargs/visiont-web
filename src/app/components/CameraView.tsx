@@ -646,30 +646,6 @@ export function CameraView() {
               />
             )}
           </motion.button>
-
-          {/* Quick action chips */}
-          <div className="flex gap-2 mt-4 flex-wrap justify-center px-4">
-            {[
-              {
-                label: "¿Qué hay frente a mí?",
-                action: "¿Qué hay frente a mí?",
-              },
-              {
-                label: "Leer texto",
-                action: "Lee el texto visible en la imagen",
-              },
-            ].map((chip) => (
-              <button
-                key={chip.action}
-                onClick={() => handleQuickAction(chip.action)}
-                className="bg-white border border-gray-200 rounded-2xl px-3 py-1.5 text-slate-600 shadow-sm active:bg-gray-50 transition-colors"
-                style={{ fontSize: "12px" }}
-                aria-label={chip.label}
-              >
-                {chip.label}
-              </button>
-            ))}
-          </div>
         </div>
 
         {/* Error messages */}
