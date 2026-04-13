@@ -42,7 +42,11 @@ export function AppHeader({ profileImage }: AppHeaderProps) {
           </div>
         )}
         <h1
-          style={{ fontSize: "18px", fontWeight: 700, letterSpacing: "-0.02em" }}
+          style={{
+            fontSize: "18px",
+            fontWeight: 700,
+            letterSpacing: "-0.02em",
+          }}
           className="text-slate-900"
         >
           {title}

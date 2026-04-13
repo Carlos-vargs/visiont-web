@@ -3,16 +3,10 @@ import { NavLink } from "react-router";
 
 const navItems = [
   {
-    path: "/camera",
-    label: "Visor",
-    icon: Camera,
-    ariaLabel: "Abrir modo visor de cámara",
-  },
-  {
     path: "/",
-    label: "Voz",
+    label: "Visor",
     icon: Mic,
-    ariaLabel: "Abrir asistente de voz",
+    ariaLabel: "Abrir asistente de voz y camara",
   },
   {
     path: "/sos",
@@ -50,8 +44,8 @@ export function BottomNav() {
                     ? "bg-orange-500 shadow-md"
                     : "bg-orange-100"
                   : isActive
-                  ? "bg-slate-900 shadow-sm"
-                  : "bg-gray-100 hover:bg-gray-150"
+                    ? "bg-slate-900 shadow-sm"
+                    : "bg-gray-100 hover:bg-gray-150"
               }`
             }
           >
@@ -66,8 +60,8 @@ export function BottomNav() {
                         ? "text-white"
                         : "text-orange-600"
                       : isActive
-                      ? "text-white"
-                      : "text-slate-700"
+                        ? "text-white"
+                        : "text-slate-700"
                   }
                   aria-hidden="true"
                 />
@@ -80,8 +74,8 @@ export function BottomNav() {
                         ? "text-white"
                         : "text-orange-700"
                       : isActive
-                      ? "text-white"
-                      : "text-slate-600"
+                        ? "text-white"
+                        : "text-slate-600"
                   }`}
                 >
                   {item.label}
