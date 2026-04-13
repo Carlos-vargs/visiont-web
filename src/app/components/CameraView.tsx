@@ -689,14 +689,14 @@ export function CameraView() {
         )}
       </div>
 
-      {/* Feedback Modal */}
+      {/* Feedback Modal
       <FeedbackModal
         isOpen={showFeedback}
         onClose={() => setShowFeedback(false)}
         feedback={feedbackText}
         onSpeak={handleSpeakFeedback}
         isLoading={isAnalyzing}
-      />
+      /> */}
 
       <BottomNav />
     </>
