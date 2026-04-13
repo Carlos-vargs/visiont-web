@@ -161,6 +161,8 @@ Mantén las respuestas informativas pero breves (2-3 oraciones máximo para feed
                 {
                   text: `${prompt}
 
+IMPORTANTE: Proporciona UN MÁXIMO DE 4 OBJÉTOS en las detecciones. No incluyas más de 4.
+
 Responde en el siguiente formato JSON si es posible, o en texto normal si no puedes detectar objetos específicos:
 {
   "feedback": "Descripción general de lo que ves",
@@ -177,7 +179,7 @@ Responde en el siguiente formato JSON si es posible, o en texto normal si no pue
   ]
 }
 
-Proporciona coordenadas aproximadas (x, y como porcentaje de la imagen desde la esquina superior izquierda, w y h como porcentaje del tamaño de la imagen).`,
+Proporciona coordenadas aproximadas (x, y como porcentaje de la imagen desde la esquina superior izquierda, w y h como porcentaje del tamaño de la imagen). Máximo 4 detecciones.`,
                 },
               ],
             },

@@ -1,15 +1,8 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { AppHeader } from "./AppHeader";
 import { BottomNav } from "./BottomNav";
 import { motion, AnimatePresence } from "motion/react";
-import {
-  Flashlight,
-  ZoomIn,
-  Info,
-  Mic,
-  MicOff,
-  MessageSquare,
-} from "lucide-react";
+import { Flashlight, ZoomIn, Info, Mic, MicOff } from "lucide-react";
 import { useCamera } from "../hooks/useCamera";
 import { useAudio } from "../hooks/useAudio";
 import { useGemini } from "../hooks/useGemini";
@@ -44,16 +37,16 @@ export function CameraView() {
   const [activeBoxes, setActiveBoxes] = useState<BoundingBox[]>([]);
   const [scanning, setScanning] = useState(true);
   const [scanLine, setScanLine] = useState(0);
-  const [geminiMode, setGeminiMode] = useState<"none" | "voice" | "text">(
-    "none",
-  );
+  const [isGeminiActive, setIsGeminiActive] = useState(false);
   const [showFeedback, setShowFeedback] = useState(false);
   const [feedbackText, setFeedbackText] = useState("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isListening, setIsListening] = useState(false);
 
-  const captureIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
-    null,
-  );
+  const captureTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const isSpeakingRef = useRef(false);
+  const isAnalysisInProgressRef = useRef(false);
 
   // Hooks
   const {
@@ -72,13 +65,14 @@ export function CameraView() {
   });
 
   const {
-    isListening,
-    isSpeaking,
+    isListening: audioListening,
+    isSpeaking: audioSpeaking,
     error: audioError,
     audioLevel,
-    startListening,
-    stopListening,
+    startListening: startAudioListening,
+    stopListening: stopAudioListening,
     speakText,
+    requestMicrophonePermission,
   } = useAudio({
     sendSampleRate: 16000,
     enableEchoCancellation: true,
@@ -102,80 +96,186 @@ export function CameraView() {
     return () => clearInterval(scanInterval);
   }, []);
 
-// Camera only activates/deactivates on mount/unmount
-useEffect(() => {
-  startCamera();
-  return () => {
-    stopCamera();
-    stopGeminiAnalysis();
-  };
-}, []);
+  // Camera only activates/deactivates on mount/unmount
+  useEffect(() => {
+    startCamera();
+    return () => {
+      stopCamera();
+      cancelAnalysis();
+    };
+  }, []);
 
-  const startGeminiAnalysis = () => {
-    captureIntervalRef.current = setInterval(async () => {
+  // Single analysis - ONE request only, no loops
+  const executeSingleAnalysis = useCallback(async () => {
+    // Prevent multiple simultaneous analyses
+    if (isAnalysisInProgressRef.current) {
+      console.warn("Analysis already in progress, ignoring request");
+      return;
+    }
+
+    isAnalysisInProgressRef.current = true;
+    setIsAnalyzing(true);
+
+    // Create abort controller for this request
+    abortControllerRef.current = new AbortController();
+
+    try {
       const frame = captureFrame();
-      if (!frame) return;
-
-      setIsAnalyzing(true);
-      try {
-        const result = await sendImageWithPrompt(
-          frame,
-          "Describe lo que ves en esta imagen de la cámara. Identifica objetos, personas, texto y obstáculos. Proporciona distancias aproximadas.",
-        );
-
-        setFeedbackText(result.feedback);
-        setShowFeedback(true);
-
-        // Convert detections to bounding boxes (ensure unique ids for React keys)
-        const now = Date.now();
-        const boxes: BoundingBox[] = result.detections.map((det, idx) => ({
-          id: now + idx,
-          ...det,
-          confidence: det.confidence || 90,
-        }));
-
-        if (boxes.length > 0) {
-          setActiveBoxes(boxes);
-        }
-
-        // Speak feedback if in voice mode
-        if (geminiMode === "voice" && result.feedback) {
-          speakText(result.feedback);
-        }
-      } catch (err) {
-        console.error("Error analyzing frame:", err);
-      } finally {
+      if (!frame || !abortControllerRef.current) {
+        isAnalysisInProgressRef.current = false;
         setIsAnalyzing(false);
+        return;
       }
-    }, 3000); // Analyze every 3 seconds
-  };
 
-  const stopGeminiAnalysis = () => {
-    if (captureIntervalRef.current) {
-      clearInterval(captureIntervalRef.current);
-      captureIntervalRef.current = null;
-    }
-  };
+      const result = await sendImageWithPrompt(
+        frame,
+        "Describe lo que ves en esta imagen de la cámara. Identifica máximo 4 objetos principales. Proporciona distancias aproximadas. Responde en formato JSON con 'feedback' (descripción general) y 'detections' (máximo 4 objetos).",
+      );
 
-  const toggleGeminiMode = () => {
-    if (geminiMode === "none") {
-      setGeminiMode("voice");
-      if (cameraPermission && cameraActive) {
-        startGeminiAnalysis();
+      // Check if request was cancelled during processing
+      if (abortControllerRef.current?.signal.aborted) {
+        console.log("Analysis was cancelled, discarding result");
+        isAnalysisInProgressRef.current = false;
+        setIsAnalyzing(false);
+        return;
       }
-    } else if (geminiMode === "voice") {
-      setGeminiMode("text");
-    } else {
-      setGeminiMode("none");
-      stopGeminiAnalysis();
+
+      setFeedbackText(result.feedback);
+      setShowFeedback(true);
+
+      // Limit to 4 detections maximum
+      const maxDetections = result.detections.slice(0, 4);
+      const now = Date.now();
+      const boxes: BoundingBox[] = maxDetections.map((det, idx) => ({
+        id: now + idx,
+        ...det,
+        confidence: det.confidence || 90,
+      }));
+
+      if (boxes.length > 0) {
+        setActiveBoxes(boxes);
+      }
+
+      // Speak feedback only if not cancelled and not already speaking
+      if (
+        !abortControllerRef.current?.signal.aborted &&
+        result.feedback &&
+        !isSpeakingRef.current
+      ) {
+        isSpeakingRef.current = true;
+        await speakText(result.feedback);
+        isSpeakingRef.current = false;
+      }
+    } catch (err: any) {
+      if (err.name === "AbortError") {
+        console.log("Analysis request aborted");
+      } else {
+        console.error("Error analyzing frame:", err);
+      }
+    } finally {
+      isAnalysisInProgressRef.current = false;
+      setIsAnalyzing(false);
+      abortControllerRef.current = null;
     }
-  };
+  }, [captureFrame, sendImageWithPrompt, speakText]);
+
+  // Cancel ongoing analysis
+  const cancelAnalysis = useCallback(() => {
+    // Abort the request if possible
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+
+    // Stop any pending timeouts
+    if (captureTimeoutRef.current) {
+      clearTimeout(captureTimeoutRef.current);
+      captureTimeoutRef.current = null;
+    }
+
+    // Stop speaking if active
+    window.speechSynthesis.cancel();
+    isSpeakingRef.current = false;
+
+    // Reset states
+    isAnalysisInProgressRef.current = false;
+    setIsAnalyzing(false);
+    setIsGeminiActive(false);
+  }, []);
 
   const handleSpeakFeedback = () => {
     if (feedbackText) {
       speakText(feedbackText);
     }
   };
+
+  // Mic button handler - STRICTLY 1 request per activation
+  const handleMicPress = useCallback(async () => {
+    // State 1: Currently analyzing → CANCEL
+    if (isAnalyzing) {
+      cancelAnalysis();
+      setIsListening(false);
+      return;
+    }
+
+    // State 2: Currently listening → STOP & EXECUTE ONE ANALYSIS
+    if (isListening) {
+      stopAudioListening();
+      setIsListening(false);
+
+      // Execute EXACTLY ONE analysis - no loops
+      await executeSingleAnalysis();
+      return;
+    }
+
+    // State 3: Idle → START LISTENING
+    const granted = await requestMicrophonePermission();
+    if (granted) {
+      setIsListening(true);
+      startAudioListening();
+    }
+  }, [
+    isAnalyzing,
+    isListening,
+    cancelAnalysis,
+    stopAudioListening,
+    executeSingleAnalysis,
+    requestMicrophonePermission,
+    startAudioListening,
+  ]);
+
+  // Quick action handlers - each triggers ONE request only
+  const handleQuickAction = useCallback(
+    async (action: string) => {
+      if (action === "camera") {
+        // Toggle camera visibility if needed
+        return;
+      }
+
+      // Prevent if already analyzing
+      if (isAnalyzing) {
+        console.warn("Cannot execute quick action while analyzing");
+        return;
+      }
+
+      // Execute ONE analysis for this query
+      try {
+        const response = await sendTextMessage(action);
+        setFeedbackText(response);
+        setShowFeedback(true);
+
+        // Speak the response once
+        if (!isSpeakingRef.current) {
+          isSpeakingRef.current = true;
+          await speakText(response);
+          isSpeakingRef.current = false;
+        }
+      } catch (err) {
+        console.error("Error getting Gemini response:", err);
+      }
+    },
+    [isAnalyzing, sendTextMessage, speakText],
+  );
 
   return (
     <>
@@ -199,19 +299,38 @@ useEffect(() => {
             )}
           </div>
 
-          {/* Gemini mode indicator */}
-          {geminiMode !== "none" && (
-            <div className="bg-emerald-50 border border-emerald-200 rounded-2xl px-3 py-2 flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+          {/* Analyzing indicator with cancel button */}
+          {isAnalyzing && (
+            <div className="bg-amber-50 border border-amber-200 rounded-2xl px-3 py-2 flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
               <span
                 style={{ fontSize: "12px" }}
-                className="text-emerald-700 font-medium"
+                className="text-amber-700 font-medium"
               >
-                {geminiMode === "voice" ? "🎤 Voz activa" : "💬 Texto activo"}
+                🔍 Analizando...
               </span>
-              {isAnalyzing && (
-                <span className="w-3 h-3 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
-              )}
+              <span className="w-3 h-3 border-2 border-amber-500 border-t-transparent rounded-full animate-spin" />
+              <button
+                onClick={cancelAnalysis}
+                className="ml-2 text-amber-600 hover:text-amber-800 font-medium"
+                style={{ fontSize: "11px" }}
+                aria-label="Cancelar análisis"
+              >
+                Cancelar
+              </button>
+            </div>
+          )}
+
+          {/* Listening indicator */}
+          {isListening && !isAnalyzing && (
+            <div className="bg-blue-50 border border-blue-200 rounded-2xl px-3 py-2 flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+              <span
+                style={{ fontSize: "12px" }}
+                className="text-blue-700 font-medium"
+              >
+                🎤 Escuchando...
+              </span>
             </div>
           )}
         </div>
@@ -219,27 +338,27 @@ useEffect(() => {
         {/* Camera frame */}
         <div className="mx-4 min-h-[44dvh] flex-1 relative overflow-hidden rounded-3xl bg-slate-800 shadow-md">
           {/* Camera feed or simulated gradient */}
-{cameraActive ? (
-  <video
-    ref={videoRef}
-    autoPlay
-    playsInline
-    muted
-    className="absolute inset-0 w-full h-full object-cover"
-  />
-) : cameraError ? (
-  <div className="absolute inset-0 flex items-center justify-center bg-slate-900 text-white text-center px-4">
-    <span className="text-lg font-semibold">{cameraError}</span>
-  </div>
-) : (
-  <div
-    className="absolute inset-0"
-    style={{
-      background:
-        "linear-gradient(160deg, #1a2332 0%, #243447 40%, #1c2d3f 70%, #0f1923 100%)",
-    }}
-  />
-)}
+          {cameraActive ? (
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="absolute inset-0 w-full h-full object-cover"
+            />
+          ) : cameraError ? (
+            <div className="absolute inset-0 flex items-center justify-center bg-slate-900 text-white text-center px-4">
+              <span className="text-lg font-semibold">{cameraError}</span>
+            </div>
+          ) : (
+            <div
+              className="absolute inset-0"
+              style={{
+                background:
+                  "linear-gradient(160deg, #1a2332 0%, #243447 40%, #1c2d3f 70%, #0f1923 100%)",
+              }}
+            />
+          )}
 
           {/* Subtle grid overlay */}
           <div
@@ -266,17 +385,17 @@ useEffect(() => {
 
           {/* Scan line */}
           <AnimatePresence>
-             {scanning && cameraActive && (
-               <motion.div
-                 className="absolute left-0 right-0 h-px z-10"
-                 style={{
-                   top: `${scanLine}%`,
-                   background:
-                     "linear-gradient(90deg, transparent, #3B82F6 20%, #60A5FA 50%, #3B82F6 80%, transparent)",
-                   boxShadow: "0 0 8px 2px rgba(59,130,246,0.6)",
-                 }}
-               />
-             )}
+            {scanning && cameraActive && (
+              <motion.div
+                className="absolute left-0 right-0 h-px z-10"
+                style={{
+                  top: `${scanLine}%`,
+                  background:
+                    "linear-gradient(90deg, transparent, #3B82F6 20%, #60A5FA 50%, #3B82F6 80%, transparent)",
+                  boxShadow: "0 0 8px 2px rgba(59,130,246,0.6)",
+                }}
+              />
+            )}
           </AnimatePresence>
 
           {/* Corner markers */}
@@ -328,67 +447,68 @@ useEffect(() => {
           })}
 
           {/* Bounding boxes */}
-           <AnimatePresence>
-             {cameraActive && activeBoxes.map((box) => (
-               <motion.div
-                 key={box.id}
-                 initial={{ opacity: 0, scale: 0.9 }}
-                 animate={{ opacity: 1, scale: 1 }}
-                 transition={{ duration: 0.3 }}
-                 className="absolute"
-                 style={{
-                   left: `${box.x}%`,
-                   top: `${box.y}%`,
-                   width: `${box.w}%`,
-                   height: `${box.h}%`,
-                 }}
-               >
-                {/* Dotted border */}
-                <div
-                  className="absolute inset-0 rounded-lg"
+          <AnimatePresence>
+            {cameraActive &&
+              activeBoxes.map((box) => (
+                <motion.div
+                  key={box.id}
+                  initial={{ opacity: 0, scale: 0.9 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  transition={{ duration: 0.3 }}
+                  className="absolute"
                   style={{
-                    border: "1.5px dashed rgba(96, 165, 250, 0.85)",
-                    boxShadow:
-                      "inset 0 0 8px rgba(59,130,246,0.1), 0 0 4px rgba(59,130,246,0.2)",
-                  }}
-                />
-
-                {/* Label */}
-                <div
-                  className="absolute -top-5 left-0 flex items-center gap-1 rounded-md px-1.5 py-0.5"
-                  style={{
-                    background: "rgba(15, 23, 42, 0.85)",
-                    backdropFilter: "blur(4px)",
+                    left: `${box.x}%`,
+                    top: `${box.y}%`,
+                    width: `${box.w}%`,
+                    height: `${box.h}%`,
                   }}
                 >
-                  <span
-                    className="text-blue-300 font-medium"
-                    style={{ fontSize: "9px", whiteSpace: "nowrap" }}
-                  >
-                    {box.label}
-                  </span>
-                  {box.distance && (
-                    <>
-                      <span className="w-px h-3 bg-slate-500" />
-                      <span
-                        className="text-emerald-400"
-                        style={{ fontSize: "9px" }}
-                      >
-                        {box.distance}
-                      </span>
-                    </>
-                  )}
-                </div>
-
-                {/* Confidence dot */}
-                {box.confidence >= 90 && (
+                  {/* Dotted border */}
                   <div
-                    className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-emerald-400"
-                    style={{ boxShadow: "0 0 4px rgba(52,211,153,0.8)" }}
+                    className="absolute inset-0 rounded-lg"
+                    style={{
+                      border: "1.5px dashed rgba(96, 165, 250, 0.85)",
+                      boxShadow:
+                        "inset 0 0 8px rgba(59,130,246,0.1), 0 0 4px rgba(59,130,246,0.2)",
+                    }}
                   />
-                )}
-              </motion.div>
-            ))}
+
+                  {/* Label */}
+                  <div
+                    className="absolute -top-5 left-0 flex items-center gap-1 rounded-md px-1.5 py-0.5"
+                    style={{
+                      background: "rgba(15, 23, 42, 0.85)",
+                      backdropFilter: "blur(4px)",
+                    }}
+                  >
+                    <span
+                      className="text-blue-300 font-medium"
+                      style={{ fontSize: "9px", whiteSpace: "nowrap" }}
+                    >
+                      {box.label}
+                    </span>
+                    {box.distance && (
+                      <>
+                        <span className="w-px h-3 bg-slate-500" />
+                        <span
+                          className="text-emerald-400"
+                          style={{ fontSize: "9px" }}
+                        >
+                          {box.distance}
+                        </span>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Confidence dot */}
+                  {box.confidence >= 90 && (
+                    <div
+                      className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-emerald-400"
+                      style={{ boxShadow: "0 0 4px rgba(52,211,153,0.8)" }}
+                    />
+                  )}
+                </motion.div>
+              ))}
           </AnimatePresence>
 
           {/* Flash overlay */}
@@ -442,60 +562,154 @@ useEffect(() => {
           >
             Objetos detectados
           </p>
-           <div className="flex flex-col gap-1.5">
-             {cameraActive && activeBoxes.slice(0, 3).map((box) => (
-               <motion.div
-                 key={box.id}
-                 initial={{ opacity: 0, x: -10 }}
-                 animate={{ opacity: 1, x: 0 }}
-                 className="bg-white rounded-2xl px-4 py-2 flex items-center justify-between shadow-sm border border-gray-100"
-               >
-                <div className="flex items-center gap-2">
-                  <div className="w-2 h-2 rounded-full bg-blue-400" />
-                  <span
-                    style={{ fontSize: "13px" }}
-                    className="text-slate-700 font-medium"
-                  >
-                    {box.label}
-                  </span>
-                </div>
-                {box.distance && (
-                  <span
-                    className="bg-slate-100 text-slate-600 rounded-full px-2 py-0.5"
-                    style={{ fontSize: "11px" }}
-                  >
-                    {box.distance}
-                  </span>
-                )}
-              </motion.div>
-            ))}
+          <div className="flex flex-col gap-1.5">
+            {cameraActive &&
+              activeBoxes.slice(0, 4).map((box) => (
+                <motion.div
+                  key={box.id}
+                  initial={{ opacity: 0, x: -10 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  className="bg-white rounded-2xl px-4 py-2 flex items-center justify-between shadow-sm border border-gray-100"
+                >
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-blue-400" />
+                    <span
+                      style={{ fontSize: "13px" }}
+                      className="text-slate-700 font-medium"
+                    >
+                      {box.label}
+                    </span>
+                  </div>
+                  {box.distance && (
+                    <span
+                      className="bg-slate-100 text-slate-600 rounded-full px-2 py-0.5"
+                      style={{ fontSize: "11px" }}
+                    >
+                      {box.distance}
+                    </span>
+                  )}
+                </motion.div>
+              ))}
           </div>
         </div>
 
-        {/* Action buttons */}
-        <div className="mx-4 mt-2 flex gap-2">
-          {/* Gemini mode toggle */}
-          <button
-            onClick={toggleGeminiMode}
-            className="flex-1 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-2xl px-4 py-3 shadow-md active:opacity-90 transition-opacity"
+        {/* Mic button and quick actions */}
+        <div className="flex flex-col items-center pb-6 pt-2">
+          <p style={{ fontSize: "12px" }} className="text-gray-400 mb-3">
+            {isAnalyzing
+              ? "Toca para cancelar"
+              : isListening
+                ? "Toca para analizar"
+                : "Toca para activar Gemini"}
+          </p>
+
+          {/* Neumorphic mic button */}
+          <motion.button
+            whileTap={{ scale: 0.93 }}
+            onClick={handleMicPress}
+            aria-label={
+              isAnalyzing
+                ? "Cancelar análisis"
+                : isListening
+                  ? "Detener y analizar"
+                  : "Activar micrófono"
+            }
+            aria-pressed={isListening || isAnalyzing}
+            className="relative flex items-center justify-center rounded-full transition-all duration-200 focus:outline-none focus-visible:ring-4 focus-visible:ring-blue-400"
+            style={{
+              width: 80,
+              height: 80,
+              background: isAnalyzing
+                ? "linear-gradient(145deg, #F59E0B, #D97706)"
+                : isListening
+                  ? "linear-gradient(145deg, #3B82F6, #2563EB)"
+                  : "#F1F5F9",
+              boxShadow: isAnalyzing
+                ? "0 8px 24px rgba(245,158,11,0.45), inset 0 1px 0 rgba(255,255,255,0.2)"
+                : isListening
+                  ? "0 8px 24px rgba(59,130,246,0.45), inset 0 1px 0 rgba(255,255,255,0.2)"
+                  : "8px 8px 16px #d1d9e0, -8px -8px 16px #ffffff",
+            }}
           >
-            <span
-              style={{ fontSize: "13px" }}
-              className="font-medium flex items-center justify-center gap-2"
-            >
-              {geminiMode === "none" && <>🤖 Activar Gemini</>}
-              {geminiMode === "voice" && (
-                <>
-                  <Mic size={14} /> Modo voz
-                </>
-              )}
-              {geminiMode === "text" && (
-                <>
-                  <MessageSquare size={14} /> Modo texto
-                </>
-              )}
-            </span>
-          </button>
+            {/* Pulse rings when analyzing or listening */}
+            {(isAnalyzing || isListening) && (
+              <>
+                <motion.div
+                  className="absolute inset-0 rounded-full bg-white/30"
+                  animate={{ scale: [1, 1.5, 1.5], opacity: [0.4, 0, 0] }}
+                  transition={{
+                    duration: 1.5,
+                    repeat: Infinity,
+                    ease: "easeOut",
+                  }}
+                />
+                <motion.div
+                  className="absolute inset-0 rounded-full bg-white/20"
+                  animate={{ scale: [1, 1.8, 1.8], opacity: [0.3, 0, 0] }}
+                  transition={{
+                    duration: 1.5,
+                    repeat: Infinity,
+                    ease: "easeOut",
+                    delay: 0.3,
+                  }}
+                />
+              </>
+            )}
+
+            {isAnalyzing ? (
+              <svg
+                width="30"
+                height="30"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="white"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="relative z-10"
+              >
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            ) : isListening ? (
+              <MicOff
+                size={30}
+                className="text-white relative z-10"
+                strokeWidth={2}
+              />
+            ) : (
+              <Mic
+                size={30}
+                strokeWidth={2}
+                style={{ color: "#1E3A5F" }}
+                className="relative z-10"
+              />
+            )}
+          </motion.button>
+
+          {/* Quick action chips */}
+          <div className="flex gap-2 mt-4 flex-wrap justify-center px-4">
+            {[
+              {
+                label: "¿Qué hay frente a mí?",
+                action: "¿Qué hay frente a mí?",
+              },
+              {
+                label: "Leer texto",
+                action: "Lee el texto visible en la imagen",
+              },
+            ].map((chip) => (
+              <button
+                key={chip.action}
+                onClick={() => handleQuickAction(chip.action)}
+                className="bg-white border border-gray-200 rounded-2xl px-3 py-1.5 text-slate-600 shadow-sm active:bg-gray-50 transition-colors"
+                style={{ fontSize: "12px" }}
+                aria-label={chip.label}
+              >
+                {chip.label}
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* Error messages */}
