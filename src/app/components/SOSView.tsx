@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { AppHeader } from "./AppHeader";
-import { BottomNav } from "./BottomNav";
+import { TopNav } from "./TopNav";
 import { motion, AnimatePresence } from "motion/react";
 import {
   Phone,
@@ -307,7 +307,7 @@ export function SOSView() {
           </div>
         </div>
       </div>
-      <BottomNav />
+      <TopNav />
     </>
   );
 }

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { AppHeader } from "./AppHeader";
-import { BottomNav } from "./BottomNav";
+import { TopNav } from "./TopNav";
 import { Mic, MicOff, Volume2, Camera } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { AudioWave } from "./AudioWave";
@@ -9,14 +9,21 @@ import { useAudio } from "../hooks/useAudio";
 import { useCamera } from "../hooks/useCamera";
 import { FeedbackModal } from "./FeedbackModal";
 
-const PROFILE_IMAGE = "https://images.unsplash.com/photo-1577565177023-d0f29c354b69?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxwZXJzb24lMjBwb3J0cmFpdCUyMGNsb3NlJTIwdXAlMjBwcm9maWxlfGVufDF8fHx8MTc3NTUyODg1Mnww&ixlib=rb-4.1.0&q=80&w=400";
+const PROFILE_IMAGE =
+  "https://images.unsplash.com/photo-1577565177023-d0f29c354b69?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxwZXJzb24lMjBwb3J0cmFpdCUyMGNsb3NlJTIwdXAlMjBwcm9maWxlfGVufDF8fHx8MTc3NTUyODg1Mnww&ixlib=rb-4.1.0&q=80&w=400";
 
 export function VoiceView() {
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [messages, setMessages] = useState<
     Array<{ id: number; text: string; sender: "assistant" | "user" }>
-  >([{ id: 0, text: "Hola, estoy listo para ayudarte. ¿Qué necesitas?", sender: "assistant" }]);
+  >([
+    {
+      id: 0,
+      text: "Hola, estoy listo para ayudarte. ¿Qué necesitas?",
+      sender: "assistant",
+    },
+  ]);
   const [showFeedback, setShowFeedback] = useState(false);
   const [feedbackText, setFeedbackText] = useState("");
   const [cameraEnabled, setCameraEnabled] = useState(false);
@@ -103,7 +110,14 @@ export function VoiceView() {
         startListening();
       }
     }
-  }, [isListening, startListening, stopListening, sendTextMessage, speakText, requestMicrophonePermission]);
+  }, [
+    isListening,
+    startListening,
+    stopListening,
+    sendTextMessage,
+    speakText,
+    requestMicrophonePermission,
+  ]);
 
   // Quick action handlers
   const handleQuickAction = useCallback(
@@ -142,7 +156,7 @@ export function VoiceView() {
           // Send captured frame to Gemini
           response = await sendImageWithPrompt(
             cameraPreview,
-            "Describe detalladamente lo que ves en esta imagen. ¿Qué objetos hay? ¿Hay personas? ¿Hay obstáculos? ¿Hay texto visible? Proporciona distancias aproximadas."
+            "Describe detalladamente lo que ves en esta imagen. ¿Qué objetos hay? ¿Hay personas? ¿Hay obstáculos? ¿Hay texto visible? Proporciona distancias aproximadas.",
           );
         } else {
           response = await sendTextMessage(userText);
@@ -170,7 +184,7 @@ export function VoiceView() {
       sendImageWithPrompt,
       sendTextMessage,
       speakText,
-    ]
+    ],
   );
 
   const handleSpeakFeedback = useCallback(() => {
@@ -182,7 +196,10 @@ export function VoiceView() {
   return (
     <>
       <AppHeader profileImage={PROFILE_IMAGE} />
-      <div className="flex flex-col flex-1 overflow-hidden pb-20" style={{ background: "#F8FAFC" }}>
+      <div
+        className="flex flex-col flex-1 overflow-hidden pb-20"
+        style={{ background: "#F8FAFC" }}
+      >
         {/* Status pills */}
         <div className="flex items-center justify-center gap-2 px-5 pt-3 pb-1">
           <AnimatePresence mode="wait">
@@ -195,7 +212,10 @@ export function VoiceView() {
                 className="flex items-center gap-1.5 bg-blue-50 border border-blue-200 rounded-full px-3 py-1"
               >
                 <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
-                <span style={{ fontSize: "12px" }} className="text-blue-700 font-medium">
+                <span
+                  style={{ fontSize: "12px" }}
+                  className="text-blue-700 font-medium"
+                >
                   Escuchando...
                 </span>
               </motion.div>
@@ -209,7 +229,10 @@ export function VoiceView() {
                 className="flex items-center gap-1.5 bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1"
               >
                 <Volume2 size={12} className="text-emerald-600" />
-                <span style={{ fontSize: "12px" }} className="text-emerald-700 font-medium">
+                <span
+                  style={{ fontSize: "12px" }}
+                  className="text-emerald-700 font-medium"
+                >
                   Asistente hablando
                 </span>
               </motion.div>
@@ -223,7 +246,10 @@ export function VoiceView() {
                 className="flex items-center gap-1.5 bg-gray-100 rounded-full px-3 py-1"
               >
                 <span className="w-2 h-2 rounded-full bg-gray-400" />
-                <span style={{ fontSize: "12px" }} className="text-gray-500 font-medium">
+                <span
+                  style={{ fontSize: "12px" }}
+                  className="text-gray-500 font-medium"
+                >
                   En espera
                 </span>
               </motion.div>
@@ -270,7 +296,12 @@ export function VoiceView() {
 
         {/* Wave visualizer card */}
         <div className="mx-5 mt-2 bg-white rounded-3xl shadow-sm border border-gray-100 p-4">
-          <AudioWave isActive={isActive} color={audioListening ? "#3B82F6" : audioSpeaking ? "#10B981" : "#CBD5E1"} />
+          <AudioWave
+            isActive={isActive}
+            color={
+              audioListening ? "#3B82F6" : audioSpeaking ? "#10B981" : "#CBD5E1"
+            }
+          />
         </div>
 
         {/* Chat messages */}
@@ -298,7 +329,10 @@ export function VoiceView() {
                       <div className="w-4 h-4 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center">
                         <Volume2 size={8} className="text-white" />
                       </div>
-                      <span style={{ fontSize: "10px" }} className="text-slate-400 font-medium uppercase tracking-wider">
+                      <span
+                        style={{ fontSize: "10px" }}
+                        className="text-slate-400 font-medium uppercase tracking-wider"
+                      >
                         VisionAI
                       </span>
                     </div>
@@ -345,18 +379,31 @@ export function VoiceView() {
                 <motion.div
                   className="absolute inset-0 rounded-full bg-blue-400"
                   animate={{ scale: [1, 1.5, 1.5], opacity: [0.4, 0, 0] }}
-                  transition={{ duration: 1.5, repeat: Infinity, ease: "easeOut" }}
+                  transition={{
+                    duration: 1.5,
+                    repeat: Infinity,
+                    ease: "easeOut",
+                  }}
                 />
                 <motion.div
                   className="absolute inset-0 rounded-full bg-blue-300"
                   animate={{ scale: [1, 1.8, 1.8], opacity: [0.3, 0, 0] }}
-                  transition={{ duration: 1.5, repeat: Infinity, ease: "easeOut", delay: 0.3 }}
+                  transition={{
+                    duration: 1.5,
+                    repeat: Infinity,
+                    ease: "easeOut",
+                    delay: 0.3,
+                  }}
                 />
               </>
             )}
 
             {isListening ? (
-              <MicOff size={30} className="text-white relative z-10" strokeWidth={2} />
+              <MicOff
+                size={30}
+                className="text-white relative z-10"
+                strokeWidth={2}
+              />
             ) : (
               <Mic
                 size={30}
@@ -370,9 +417,18 @@ export function VoiceView() {
           {/* Quick action chips */}
           <div className="flex gap-2 mt-4 flex-wrap justify-center px-4">
             {[
-              { label: "¿Qué hay frente a mí?", action: "¿Qué hay frente a mí?" },
-              { label: "Leer texto", action: "Lee el texto visible en la imagen" },
-              { label: showCamera ? "Ocultar cámara" : "Mostrar cámara", action: "camera" },
+              {
+                label: "¿Qué hay frente a mí?",
+                action: "¿Qué hay frente a mí?",
+              },
+              {
+                label: "Leer texto",
+                action: "Lee el texto visible en la imagen",
+              },
+              {
+                label: showCamera ? "Ocultar cámara" : "Mostrar cámara",
+                action: "camera",
+              },
             ].map((chip) => (
               <button
                 key={chip.action}
@@ -406,7 +462,7 @@ export function VoiceView() {
         isLoading={geminiLoading}
       />
 
-      <BottomNav />
+      <TopNav />
     </>
   );
 }

@@ -15,18 +15,12 @@ const navItems = [
     isSOS: true,
     ariaLabel: "Botón de emergencia SOS",
   },
-  // {
-  //   path: "/settings",
-  //   label: "Ajustes",
-  //   icon: Settings,
-  //   ariaLabel: "Abrir ajustes",
-  // },
 ];
 
-export function BottomNav() {
+export function TopNav() {
   return (
     <nav
-      className="fixed bottom-0 left-0 right-0 w-full px-4 py-3 bg-white border-t border-gray-100 z-50"
+      className="fixed top-0 left-0 right-0 w-full px-4 py-3 bg-white border-t border-gray-100 z-50"
       aria-label="Navegación principal"
     >
       <div className="flex items-center justify-between gap-2">

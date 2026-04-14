@@ -2,6 +2,7 @@ import { useLocation } from "react-router";
 import { Eye, ChevronLeft } from "lucide-react";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { useNavigate } from "react-router";
+import { TopNav } from "./TopNav";
 
 const viewTitles: Record<string, string> = {
   "/": "VisionAI",
@@ -48,6 +49,8 @@ export function AppHeader() {
           {title}
         </h1>
       </div>
+
+      <TopNav />
     </header>
   );
 }

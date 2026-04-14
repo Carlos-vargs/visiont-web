@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { AppHeader } from "./AppHeader";
-import { BottomNav } from "./BottomNav";
+import { TopNav } from "./TopNav";
 import { motion, AnimatePresence } from "motion/react";
 import { Flashlight, ZoomIn, Info, Mic, MicOff } from "lucide-react";
 import { useCamera } from "../hooks/useCamera";
@@ -278,27 +278,11 @@ export function CameraView() {
     <>
       <AppHeader />
       <div
-        className="flex flex-col flex-1 overflow-hidden pb-20"
+        className="flex flex-col flex-1 overflow-hidden"
         style={{ background: "#F8FAFC" }}
       >
-        {/* Status bar */}
-        <div className="mx-4 mt-3 mb-2 flex gap-2 flex-wrap">
-          {/* Info banner */}
-          <div className="flex-1 min-w-[200px] bg-blue-50 border border-blue-100 rounded-2xl px-4 py-2 flex items-center gap-2">
-            <Info size={14} className="text-blue-500 shrink-0" />
-            <span style={{ fontSize: "12px" }} className="text-blue-700">
-              {scanning
-                ? "Analizando entorno..."
-                : `${activeBoxes.length} objetos detectados`}
-            </span>
-            {scanning && (
-              <span className="ml-auto w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
-            )}
-          </div>
-        </div>
-
         {/* Camera frame */}
-        <div className="mx-4 min-h-[44dvh] flex-1 relative overflow-hidden rounded-3xl bg-slate-800 shadow-md">
+        <div className="mx-4 mt-6 min-h-[58dvh] flex-1 relative overflow-hidden rounded-3xl bg-slate-800 shadow-md">
           {/* Camera feed - always rendered for videoRef to exist */}
           <video
             ref={videoRef}
@@ -516,12 +500,6 @@ export function CameraView() {
 
         {/* Detections list */}
         <div className="mx-4 mt-3 mb-2">
-          <p
-            style={{ fontSize: "11px" }}
-            className="text-gray-400 uppercase tracking-wider mb-2 px-1"
-          >
-            Objetos detectados
-          </p>
           <div className="flex flex-col gap-1.5">
             {cameraActive &&
               activeBoxes.slice(0, 4).map((box) => (
@@ -554,19 +532,21 @@ export function CameraView() {
         </div>
 
         {/* Mic button and quick actions */}
-        <div className="flex flex-col items-center pb-6 pt-2">
+        <div
+          onClick={handleMicPress}
+          className="flex flex-col items-center pb-6 pt-2"
+        >
           <p style={{ fontSize: "12px" }} className="text-gray-400 mb-3">
             {isAnalyzing
               ? "Analizando... Toca para cancelar"
               : isListening
                 ? "Escuchando... Toca para analizar"
-                : "Toca para activar Gemini"}
+                : "Toca para hablar"}
           </p>
 
           {/* Neumorphic mic button */}
           <motion.button
             whileTap={{ scale: 0.93 }}
-            onClick={handleMicPress}
             aria-label={
               isAnalyzing
                 ? "Cancelar análisis"
@@ -657,17 +637,6 @@ export function CameraView() {
           </div>
         )}
       </div>
-
-      {/* Feedback Modal
-      <FeedbackModal
-        isOpen={showFeedback}
-        onClose={() => setShowFeedback(false)}
-        feedback={feedbackText}
-        onSpeak={handleSpeakFeedback}
-        isLoading={isAnalyzing}
-      /> */}
-
-      <BottomNav />
     </>
   );
 }
