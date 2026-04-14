@@ -23,33 +23,6 @@ export function AppHeader() {
       style={{ background: "#F8FAFC" }}
       aria-label="Encabezado de la aplicación"
     >
-      {/* Left: back or logo */}
-      <div className="flex items-center gap-2">
-        {!isHome ? (
-          <button
-            onClick={() => navigate(-1)}
-            aria-label="Volver atrás"
-            className="w-8 h-8 rounded-full bg-white border border-gray-200 shadow-sm flex items-center justify-center active:bg-gray-50 transition-colors mr-1"
-          >
-            <ChevronLeft size={16} className="text-slate-700" />
-          </button>
-        ) : (
-          <div className="w-8 h-8 rounded-xl bg-slate-900 flex items-center justify-center mr-1">
-            <Eye size={16} className="text-white" strokeWidth={1.5} />
-          </div>
-        )}
-        <h1
-          style={{
-            fontSize: "18px",
-            fontWeight: 700,
-            letterSpacing: "-0.02em",
-          }}
-          className="text-slate-900"
-        >
-          {title}
-        </h1>
-      </div>
-
       <TopNav />
     </header>
   );

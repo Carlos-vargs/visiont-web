@@ -241,39 +241,6 @@ export function CameraView() {
     startAudioListening,
   ]);
 
-  // Quick action handlers - each triggers ONE request only
-  const handleQuickAction = useCallback(
-    async (action: string) => {
-      if (action === "camera") {
-        // Toggle camera visibility if needed
-        return;
-      }
-
-      // Prevent if already analyzing
-      if (isAnalyzing) {
-        console.warn("Cannot execute quick action while analyzing");
-        return;
-      }
-
-      // Execute ONE analysis for this query
-      try {
-        const response = await sendTextMessage(action);
-        setFeedbackText(response);
-        setShowFeedback(true);
-
-        // Speak the response once
-        if (!isSpeakingRef.current) {
-          isSpeakingRef.current = true;
-          await speakText(response);
-          isSpeakingRef.current = false;
-        }
-      } catch (err) {
-        console.error("Error getting Gemini response:", err);
-      }
-    },
-    [isAnalyzing, sendTextMessage, speakText],
-  );
-
   return (
     <>
       <AppHeader />
@@ -282,7 +249,7 @@ export function CameraView() {
         style={{ background: "#F8FAFC" }}
       >
         {/* Camera frame */}
-        <div className="mx-4 mt-6 min-h-[58dvh] flex-1 relative overflow-hidden rounded-3xl bg-slate-800 shadow-md">
+        <div className="mx-4 mt-12 relative overflow-hidden rounded-3xl bg-slate-800 shadow-md" style={{ minHeight: 'calc(100vh - 220px)' }}>
           {/* Camera feed - always rendered for videoRef to exist */}
           <video
             ref={videoRef}
@@ -498,43 +465,10 @@ export function CameraView() {
           </div>
         </div>
 
-        {/* Detections list */}
-        <div className="mx-4 mt-3 mb-2">
-          <div className="flex flex-col gap-1.5">
-            {cameraActive &&
-              activeBoxes.slice(0, 4).map((box) => (
-                <motion.div
-                  key={box.id}
-                  initial={{ opacity: 0, x: -10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  className="bg-white rounded-2xl px-4 py-2 flex items-center justify-between shadow-sm border border-gray-100"
-                >
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-blue-400" />
-                    <span
-                      style={{ fontSize: "13px" }}
-                      className="text-slate-700 font-medium"
-                    >
-                      {box.label}
-                    </span>
-                  </div>
-                  {box.distance && (
-                    <span
-                      className="bg-slate-100 text-slate-600 rounded-full px-2 py-0.5"
-                      style={{ fontSize: "11px" }}
-                    >
-                      {box.distance}
-                    </span>
-                  )}
-                </motion.div>
-              ))}
-          </div>
-        </div>
-
         {/* Mic button and quick actions */}
         <div
           onClick={handleMicPress}
-          className="flex flex-col items-center pb-6 pt-2"
+          className="flex flex-col fixed bottom-0 w-full items-center pb-6 pt-2"
         >
           <p style={{ fontSize: "12px" }} className="text-gray-400 mb-3">
             {isAnalyzing
