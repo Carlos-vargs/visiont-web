@@ -46,7 +46,9 @@ export function CameraView() {
   const isAnalysisInProgressRef = useRef(false);
   const isListeningRef = useRef(false);
   const isAnalyzingRef = useRef(false);
-  const executeSingleAnalysisRef = useRef<((transcript?: string) => Promise<void>) | null>(null);
+  const executeSingleAnalysisRef = useRef<
+    ((transcript?: string) => Promise<void>) | null
+  >(null);
   const startVoiceListeningRef = useRef<(() => Promise<void>) | null>(null);
 
   // Keep refs updated
@@ -120,7 +122,10 @@ export function CameraView() {
       }
     },
     onSilence: (transcript: string) => {
-      console.log("Silence detected, executing analysis with transcript:", transcript);
+      console.log(
+        "Silence detected, executing analysis with transcript:",
+        transcript,
+      );
       // Only execute analysis if currently listening
       if (isListeningRef.current) {
         if (executeSingleAnalysisRef.current) {
@@ -129,6 +134,13 @@ export function CameraView() {
       }
     },
   });
+
+  // Log user transcript as they speak
+  useEffect(() => {
+    if (userTranscript) {
+      console.log("[Voice Transcript]", userTranscript);
+    }
+  }, [userTranscript]);
 
   // Start listening when voice activation detects wake word
   const startVoiceListening = useCallback(async () => {
@@ -159,7 +171,7 @@ export function CameraView() {
   // Camera only activates/deactivates on mount/unmount
   useEffect(() => {
     startCamera();
-    
+
     // Start background voice activation (wake word detection)
     if (voiceActivationEnabled) {
       setTimeout(() => {
@@ -174,107 +186,116 @@ export function CameraView() {
   }, []);
 
   // Speak status message (non-blocking, fire-and-forget)
-  const speakStatus = useCallback(async (text: string) => {
-    // Cancel any ongoing speech before speaking new status
-    window.speechSynthesis.cancel();
-    isSpeakingRef.current = true;
-    
-    try {
-      await speakText(text);
-    } finally {
-      isSpeakingRef.current = false;
-    }
-  }, [speakText]);
+  const speakStatus = useCallback(
+    async (text: string) => {
+      // Cancel any ongoing speech before speaking new status
+      window.speechSynthesis.cancel();
+      isSpeakingRef.current = true;
 
-  // Single analysis - ONE request only, no loops
-  const executeSingleAnalysis = useCallback(async (userTranscript?: string) => {
-    // Prevent multiple simultaneous analyses
-    if (isAnalysisInProgressRef.current) {
-      console.warn("Analysis already in progress, ignoring request");
-      return;
-    }
-
-    isAnalysisInProgressRef.current = true;
-    setIsAnalyzing(true);
-
-    // Announce analysis started
-    speakStatus("Analizando");
-
-    // Create abort controller for this request
-    abortControllerRef.current = new AbortController();
-
-    try {
-      const frame = captureFrame();
-      if (!frame || !abortControllerRef.current) {
-        isAnalysisInProgressRef.current = false;
-        setIsAnalyzing(false);
-        return;
-      }
-
-      // Build dynamic prompt based on user transcript
-      const basePrompt = "Analiza la imagen de la cámara.";
-      const contextPrompt = userTranscript
-        ? `El usuario dijo: "${userTranscript}". Responde a lo que pide el usuario basándote en lo que ves en la imagen. ` +
-          `Si el usuario pide identificar objetos, proporciona máximo 4 objetos con distancias aproximadas. ` +
-          `Responde en formato JSON con 'feedback' (descripción respondiendo al usuario) y 'detections' (máximo 4 objetos si aplica).`
-        : `Describe lo que ves en esta imagen de la cámara. Identifica máximo 4 objetos principales. ` +
-          `Proporciona distancias aproximadas. Responde en formato JSON con 'feedback' (descripción general) y 'detections' (máximo 4 objetos).`;
-
-      const result = await sendImageWithPrompt(frame, contextPrompt || basePrompt);
-
-      // Check if request was cancelled during processing
-      if (abortControllerRef.current?.signal.aborted) {
-        console.log("Analysis was cancelled, discarding result");
-        isAnalysisInProgressRef.current = false;
-        setIsAnalyzing(false);
-        return;
-      }
-
-      setFeedbackText(result.feedback);
-      setShowFeedback(true);
-
-      // Limit to 4 detections maximum
-      const maxDetections = result.detections.slice(0, 4);
-      const now = Date.now();
-      const boxes: BoundingBox[] = maxDetections.map((det, idx) => ({
-        id: now + idx,
-        ...det,
-        confidence: det.confidence || 90,
-      }));
-
-      if (boxes.length > 0) {
-        setActiveBoxes(boxes);
-      }
-
-      // Speak feedback only if not cancelled and not already speaking
-      if (
-        !abortControllerRef.current?.signal.aborted &&
-        result.feedback &&
-        !isSpeakingRef.current
-      ) {
-        isSpeakingRef.current = true;
-        await speakText(result.feedback);
+      try {
+        await speakText(text);
+      } finally {
         isSpeakingRef.current = false;
       }
+    },
+    [speakText],
+  );
 
-      // Reset voice activation after analysis completes
-      resetActive();
-    } catch (err: any) {
-      if (err.name === "AbortError") {
-        console.log("Analysis request aborted");
-        // Reset voice activation on abort
-        resetActive();
-      } else {
-        console.error("Error analyzing frame:", err);
-        // Reset voice activation on error
-        resetActive();
+  // Single analysis - ONE request only, no loops
+  const executeSingleAnalysis = useCallback(
+    async (userTranscript?: string) => {
+      // Prevent multiple simultaneous analyses
+      if (isAnalysisInProgressRef.current) {
+        console.warn("Analysis already in progress, ignoring request");
+        return;
       }
-    } finally {
-      isAnalysisInProgressRef.current = false;
-      setIsAnalyzing(false);
-      abortControllerRef.current = null;
-    }
-  }, [captureFrame, sendImageWithPrompt, speakText, speakStatus, resetActive]);
+
+      isAnalysisInProgressRef.current = true;
+      setIsAnalyzing(true);
+
+      // Announce analysis started
+      speakStatus("Analizando");
+
+      // Create abort controller for this request
+      abortControllerRef.current = new AbortController();
+
+      try {
+        const frame = captureFrame();
+        if (!frame || !abortControllerRef.current) {
+          isAnalysisInProgressRef.current = false;
+          setIsAnalyzing(false);
+          return;
+        }
+
+        // Build dynamic prompt based on user transcript
+        const basePrompt = "Analiza la imagen de la cámara.";
+        const contextPrompt = userTranscript
+          ? `El usuario dijo: "${userTranscript}". Responde a lo que pide el usuario basándote en lo que ves en la imagen. ` +
+            `Si el usuario pide identificar objetos, proporciona máximo 4 objetos con distancias aproximadas. ` +
+            `Responde en formato JSON con 'feedback' (descripción respondiendo al usuario) y 'detections' (máximo 4 objetos si aplica).`
+          : `Describe lo que ves en esta imagen de la cámara. Identifica máximo 4 objetos principales. ` +
+            `Proporciona distancias aproximadas. Responde en formato JSON con 'feedback' (descripción general) y 'detections' (máximo 4 objetos).`;
+
+        const result = await sendImageWithPrompt(
+          frame,
+          contextPrompt || basePrompt,
+        );
+
+        // Check if request was cancelled during processing
+        if (abortControllerRef.current?.signal.aborted) {
+          console.log("Analysis was cancelled, discarding result");
+          isAnalysisInProgressRef.current = false;
+          setIsAnalyzing(false);
+          return;
+        }
+
+        setFeedbackText(result.feedback);
+        setShowFeedback(true);
+
+        // Limit to 4 detections maximum
+        const maxDetections = result.detections.slice(0, 4);
+        const now = Date.now();
+        const boxes: BoundingBox[] = maxDetections.map((det, idx) => ({
+          id: now + idx,
+          ...det,
+          confidence: det.confidence || 90,
+        }));
+
+        if (boxes.length > 0) {
+          setActiveBoxes(boxes);
+        }
+
+        // Speak feedback only if not cancelled and not already speaking
+        if (
+          !abortControllerRef.current?.signal.aborted &&
+          result.feedback &&
+          !isSpeakingRef.current
+        ) {
+          isSpeakingRef.current = true;
+          await speakText(result.feedback);
+          isSpeakingRef.current = false;
+        }
+
+        // Reset voice activation after analysis completes
+        resetActive();
+      } catch (err: any) {
+        if (err.name === "AbortError") {
+          console.log("Analysis request aborted");
+          // Reset voice activation on abort
+          resetActive();
+        } else {
+          console.error("Error analyzing frame:", err);
+          // Reset voice activation on error
+          resetActive();
+        }
+      } finally {
+        isAnalysisInProgressRef.current = false;
+        setIsAnalyzing(false);
+        abortControllerRef.current = null;
+      }
+    },
+    [captureFrame, sendImageWithPrompt, speakText, speakStatus, resetActive],
+  );
 
   // Assign executeSingleAnalysis to ref for voice activation callbacks
   useEffect(() => {
@@ -283,6 +304,10 @@ export function CameraView() {
 
   // Cancel ongoing analysis
   const cancelAnalysis = useCallback(() => {
+    // Only announce cancellation if there was actually something to cancel
+    const hadAnalysis =
+      isAnalysisInProgressRef.current || abortControllerRef.current;
+
     // Abort the request if possible
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -306,8 +331,10 @@ export function CameraView() {
     // Reset voice activation
     resetActive();
 
-    // Announce cancellation
-    speakStatus("Cancelando");
+    // Announce cancellation only if user actually started an analysis
+    if (hadAnalysis) {
+      speakStatus("Cancelando");
+    }
   }, [speakStatus, resetActive]);
 
   const handleSpeakFeedback = () => {
@@ -362,7 +389,10 @@ export function CameraView() {
         style={{ background: "#F8FAFC" }}
       >
         {/* Camera frame */}
-        <div className="mx-4 mt-12 relative overflow-hidden rounded-3xl bg-slate-800 shadow-md" style={{ minHeight: 'calc(100dvh - 220px)' }}>
+        <div
+          className="mx-4 mt-12 relative overflow-hidden rounded-3xl bg-slate-800 shadow-md"
+          style={{ minHeight: "calc(100dvh - 220px)" }}
+        >
           {/* Camera feed - always rendered for videoRef to exist */}
           <video
             ref={videoRef}
@@ -418,7 +448,9 @@ export function CameraView() {
           {isBackgroundListening && !isListening && !isAnalyzing && (
             <div className="absolute top-3 left-3 bg-black/50 backdrop-blur-sm rounded-full px-3 py-1.5 flex items-center gap-2">
               <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-              <span className="text-green-400 text-xs">Escuchando comandos de voz</span>
+              <span className="text-green-400 text-xs">
+                Escuchando comandos de voz
+              </span>
             </div>
           )}
 

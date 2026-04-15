@@ -94,7 +94,6 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
       recognition.onstart = () => {
         setIsBackgroundListening(true);
         isBackgroundListeningRef.current = true;
-        console.log("Background voice activation started");
       };
 
       recognition.onresult = (event: any) => {

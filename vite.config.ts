@@ -33,4 +33,23 @@ export default defineConfig({
 
   // File types to support raw imports. Never add .css, .tsx, or .ts files to this.
   assetsInclude: ['**/*.svg', '**/*.csv'],
+
+  build: {
+    rollupOptions: {
+      output: {
+        // Separar worklets en su propia carpeta
+        assetFileNames: (assetInfo) => {
+          if (assetInfo.names?.includes('worklet')) {
+            return 'assets/worklets/[name]-[hash][extname]';
+          }
+          return 'assets/[name]-[hash][extname]';
+        },
+      },
+    },
+  },
+
+  // Configuración para workers/worklets
+  worker: {
+    format: 'es',
+  },
 })
