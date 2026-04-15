@@ -13,26 +13,12 @@ import {
 
 const contacts = [
   {
-    id: 1,
-    name: "María García",
-    relation: "Familiar",
-    phone: "+34 612 345 678",
-    initials: "MG",
-  },
-  {
     id: 2,
-    name: "Cruz Roja",
+    name: "Cruz Blanca",
     relation: "Emergencias",
-    phone: "112",
-    initials: "CR",
+    phone: "128",
+    initials: "CB",
     isEmergency: true,
-  },
-  {
-    id: 3,
-    name: "Dr. Rodríguez",
-    relation: "Médico",
-    phone: "+34 698 765 432",
-    initials: "DR",
   },
 ];
 
@@ -72,7 +58,7 @@ export function SOSView() {
         style={{ background: "#F8FAFC" }}
       >
         {/* SOS Main Button */}
-        <div className="flex flex-col items-center pt-6 pb-4 px-5">
+        <div className="flex flex-col items-center pt-17 pb-4 px-5">
           <div className="relative flex items-center justify-center mb-3">
             {sosActive && (
               <>
