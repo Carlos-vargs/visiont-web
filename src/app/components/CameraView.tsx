@@ -46,7 +46,7 @@ export function CameraView() {
   const isAnalysisInProgressRef = useRef(false);
   const isListeningRef = useRef(false);
   const isAnalyzingRef = useRef(false);
-  const executeSingleAnalysisRef = useRef<(() => Promise<void>) | null>(null);
+  const executeSingleAnalysisRef = useRef<((transcript?: string) => Promise<void>) | null>(null);
   const startVoiceListeningRef = useRef<(() => Promise<void>) | null>(null);
 
   // Keep refs updated
@@ -104,6 +104,7 @@ export function CameraView() {
     isBackgroundListening,
     isActive: voiceActive,
     isProcessing: voiceProcessing,
+    transcript: userTranscript,
     error: voiceError,
     startBackgroundListening,
     resetActive,
@@ -118,12 +119,12 @@ export function CameraView() {
         }
       }
     },
-    onSilence: () => {
-      console.log("Silence detected, executing analysis...");
+    onSilence: (transcript: string) => {
+      console.log("Silence detected, executing analysis with transcript:", transcript);
       // Only execute analysis if currently listening
       if (isListeningRef.current) {
         if (executeSingleAnalysisRef.current) {
-          executeSingleAnalysisRef.current();
+          executeSingleAnalysisRef.current(transcript);
         }
       }
     },
@@ -186,7 +187,7 @@ export function CameraView() {
   }, [speakText]);
 
   // Single analysis - ONE request only, no loops
-  const executeSingleAnalysis = useCallback(async () => {
+  const executeSingleAnalysis = useCallback(async (userTranscript?: string) => {
     // Prevent multiple simultaneous analyses
     if (isAnalysisInProgressRef.current) {
       console.warn("Analysis already in progress, ignoring request");
@@ -197,7 +198,7 @@ export function CameraView() {
     setIsAnalyzing(true);
 
     // Announce analysis started
-    speakStatus("Analizando, tocar para cancelar");
+    speakStatus("Analizando");
 
     // Create abort controller for this request
     abortControllerRef.current = new AbortController();
@@ -210,10 +211,16 @@ export function CameraView() {
         return;
       }
 
-      const result = await sendImageWithPrompt(
-        frame,
-        "Describe lo que ves en esta imagen de la cámara. Identifica máximo 4 objetos principales. Proporciona distancias aproximadas. Responde en formato JSON con 'feedback' (descripción general) y 'detections' (máximo 4 objetos).",
-      );
+      // Build dynamic prompt based on user transcript
+      const basePrompt = "Analiza la imagen de la cámara.";
+      const contextPrompt = userTranscript
+        ? `El usuario dijo: "${userTranscript}". Responde a lo que pide el usuario basándote en lo que ves en la imagen. ` +
+          `Si el usuario pide identificar objetos, proporciona máximo 4 objetos con distancias aproximadas. ` +
+          `Responde en formato JSON con 'feedback' (descripción respondiendo al usuario) y 'detections' (máximo 4 objetos si aplica).`
+        : `Describe lo que ves en esta imagen de la cámara. Identifica máximo 4 objetos principales. ` +
+          `Proporciona distancias aproximadas. Responde en formato JSON con 'feedback' (descripción general) y 'detections' (máximo 4 objetos).`;
+
+      const result = await sendImageWithPrompt(frame, contextPrompt || basePrompt);
 
       // Check if request was cancelled during processing
       if (abortControllerRef.current?.signal.aborted) {
@@ -323,7 +330,7 @@ export function CameraView() {
       stopAudioListening();
       setIsListening(false);
 
-      // Execute EXACTLY ONE analysis - no loops
+      // Execute EXACTLY ONE analysis - no loops (no transcript from manual press)
       await executeSingleAnalysis();
       return;
     }

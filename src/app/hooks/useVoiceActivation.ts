@@ -5,7 +5,7 @@ type VoiceActivationOptions = {
   silenceTimeout?: number;
   language?: string;
   onActivation?: () => void;
-  onSilence?: () => void;
+  onSilence?: (transcript: string) => void;
 };
 
 /**
@@ -25,6 +25,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
   const [isActive, setIsActive] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [transcript, setTranscript] = useState<string>("");
 
   const recognitionRef = useRef<any>(null);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -62,9 +63,9 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
         }
       }
 
-      // Call the onSilence callback to trigger analysis
-      if (optionsRef.current.onSilence) {
-        optionsRef.current.onSilence();
+      // Call the onSilence callback to trigger analysis with transcript
+      if (optionsRef.current.onSilence && transcriptBufferRef.current) {
+        optionsRef.current.onSilence(transcriptBufferRef.current.trim());
       }
 
       isProcessingRef.current = false;
@@ -125,7 +126,9 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
           // Activate listening mode
           isActiveRef.current = true;
           setIsActive(true);
-          transcriptBufferRef.current = "";
+          // Start fresh transcript buffer (exclude wake word if possible)
+          transcriptBufferRef.current = fullTranscript + " ";
+          setTranscript(fullTranscript);
 
           // Call activation callback
           if (optionsRef.current.onActivation) {
@@ -139,6 +142,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
         // If already active, buffer the transcript and keep checking for silence
         if (isActiveRef.current && fullTranscript) {
           transcriptBufferRef.current += fullTranscript + " ";
+          setTranscript(transcriptBufferRef.current.trim());
 
           // Reset silence timer on each speech input
           if (silenceTimerRef.current) {
@@ -205,6 +209,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     isActiveRef.current = false;
     setIsActive(false);
     transcriptBufferRef.current = "";
+    setTranscript("");
 
     if (silenceTimerRef.current) {
       clearTimeout(silenceTimerRef.current);
@@ -212,13 +217,13 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     }
 
     // Restart background listening
-    if (isBackgroundListening) {
+    if (isBackgroundListeningRef.current) {
       stopBackgroundListening();
       setTimeout(() => {
         startBackgroundListening();
       }, 100);
     }
-  }, [isBackgroundListening, startBackgroundListening, stopBackgroundListening]);
+  }, [startBackgroundListening, stopBackgroundListening]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -231,6 +236,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     isBackgroundListening,
     isActive,
     isProcessing,
+    transcript,
     error,
     startBackgroundListening,
     stopBackgroundListening,
