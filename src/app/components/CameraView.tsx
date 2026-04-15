@@ -103,6 +103,19 @@ export function CameraView() {
     };
   }, []);
 
+  // Speak status message (non-blocking, fire-and-forget)
+  const speakStatus = useCallback(async (text: string) => {
+    // Cancel any ongoing speech before speaking new status
+    window.speechSynthesis.cancel();
+    isSpeakingRef.current = true;
+    
+    try {
+      await speakText(text);
+    } finally {
+      isSpeakingRef.current = false;
+    }
+  }, [speakText]);
+
   // Single analysis - ONE request only, no loops
   const executeSingleAnalysis = useCallback(async () => {
     // Prevent multiple simultaneous analyses
@@ -113,6 +126,9 @@ export function CameraView() {
 
     isAnalysisInProgressRef.current = true;
     setIsAnalyzing(true);
+
+    // Announce analysis started
+    speakStatus("Analizando, tocar para cancelar");
 
     // Create abort controller for this request
     abortControllerRef.current = new AbortController();
@@ -175,7 +191,7 @@ export function CameraView() {
       setIsAnalyzing(false);
       abortControllerRef.current = null;
     }
-  }, [captureFrame, sendImageWithPrompt, speakText]);
+  }, [captureFrame, sendImageWithPrompt, speakText, speakStatus]);
 
   // Cancel ongoing analysis
   const cancelAnalysis = useCallback(() => {
@@ -198,7 +214,10 @@ export function CameraView() {
     // Reset states
     isAnalysisInProgressRef.current = false;
     setIsAnalyzing(false);
-  }, []);
+
+    // Announce cancellation
+    speakStatus("Cancelando");
+  }, [speakStatus]);
 
   const handleSpeakFeedback = () => {
     if (feedbackText) {
@@ -230,6 +249,8 @@ export function CameraView() {
     if (granted) {
       setIsListening(true);
       startAudioListening();
+      // Announce that we're listening
+      speakStatus("Escuchando, tocar para analizar");
     }
   }, [
     isAnalyzing,
@@ -239,6 +260,7 @@ export function CameraView() {
     executeSingleAnalysis,
     requestMicrophonePermission,
     startAudioListening,
+    speakStatus,
   ]);
 
   return (
