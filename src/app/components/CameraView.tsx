@@ -6,6 +6,7 @@ import { Flashlight, ZoomIn, Info, Mic, MicOff } from "lucide-react";
 import { useCamera } from "../hooks/useCamera";
 import { useAudio } from "../hooks/useAudio";
 import { useGemini } from "../hooks/useGemini";
+import { useVoiceActivation } from "../hooks/useVoiceActivation";
 import { FeedbackModal } from "./FeedbackModal";
 
 type BoundingBox = {
@@ -37,11 +38,25 @@ export function CameraView() {
   const [feedbackText, setFeedbackText] = useState("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isListening, setIsListening] = useState(false);
+  const [voiceActivationEnabled, setVoiceActivationEnabled] = useState(true);
 
   const captureTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const isSpeakingRef = useRef(false);
   const isAnalysisInProgressRef = useRef(false);
+  const isListeningRef = useRef(false);
+  const isAnalyzingRef = useRef(false);
+  const executeSingleAnalysisRef = useRef<(() => Promise<void>) | null>(null);
+  const startVoiceListeningRef = useRef<(() => Promise<void>) | null>(null);
+
+  // Keep refs updated
+  useEffect(() => {
+    isListeningRef.current = isListening;
+  }, [isListening]);
+
+  useEffect(() => {
+    isAnalyzingRef.current = isAnalyzing;
+  }, [isAnalyzing]);
 
   // Hooks
   const {
@@ -84,6 +99,52 @@ export function CameraView() {
     sendTextMessage,
   } = useGemini();
 
+  // Voice activation hook - listens for wake words in background
+  const {
+    isBackgroundListening,
+    isActive: voiceActive,
+    isProcessing: voiceProcessing,
+    error: voiceError,
+    startBackgroundListening,
+    resetActive,
+  } = useVoiceActivation({
+    silenceTimeout: 4000, // Increased to 4 seconds for better UX
+    onActivation: () => {
+      console.log("Wake word detected, auto-activating microphone...");
+      // Only start listening if not already listening or analyzing
+      if (!isListeningRef.current && !isAnalyzingRef.current) {
+        if (startVoiceListeningRef.current) {
+          startVoiceListeningRef.current();
+        }
+      }
+    },
+    onSilence: () => {
+      console.log("Silence detected, executing analysis...");
+      // Only execute analysis if currently listening
+      if (isListeningRef.current) {
+        if (executeSingleAnalysisRef.current) {
+          executeSingleAnalysisRef.current();
+        }
+      }
+    },
+  });
+
+  // Start listening when voice activation detects wake word
+  const startVoiceListening = useCallback(async () => {
+    const granted = await requestMicrophonePermission();
+    if (granted) {
+      setIsListening(true);
+      startAudioListening();
+      // Announce that we're listening
+      speakStatus("Escuchando");
+    }
+  }, [requestMicrophonePermission, startAudioListening, speakText]);
+
+  // Assign startVoiceListening to ref for voice activation callbacks
+  useEffect(() => {
+    startVoiceListeningRef.current = startVoiceListening;
+  }, [startVoiceListening]);
+
   // Scan line animation
   useEffect(() => {
     let prog = 0;
@@ -97,6 +158,14 @@ export function CameraView() {
   // Camera only activates/deactivates on mount/unmount
   useEffect(() => {
     startCamera();
+    
+    // Start background voice activation (wake word detection)
+    if (voiceActivationEnabled) {
+      setTimeout(() => {
+        startBackgroundListening();
+      }, 1000); // Delay to let camera initialize
+    }
+
     return () => {
       stopCamera();
       cancelAnalysis();
@@ -180,18 +249,30 @@ export function CameraView() {
         await speakText(result.feedback);
         isSpeakingRef.current = false;
       }
+
+      // Reset voice activation after analysis completes
+      resetActive();
     } catch (err: any) {
       if (err.name === "AbortError") {
         console.log("Analysis request aborted");
+        // Reset voice activation on abort
+        resetActive();
       } else {
         console.error("Error analyzing frame:", err);
+        // Reset voice activation on error
+        resetActive();
       }
     } finally {
       isAnalysisInProgressRef.current = false;
       setIsAnalyzing(false);
       abortControllerRef.current = null;
     }
-  }, [captureFrame, sendImageWithPrompt, speakText, speakStatus]);
+  }, [captureFrame, sendImageWithPrompt, speakText, speakStatus, resetActive]);
+
+  // Assign executeSingleAnalysis to ref for voice activation callbacks
+  useEffect(() => {
+    executeSingleAnalysisRef.current = executeSingleAnalysis;
+  }, [executeSingleAnalysis]);
 
   // Cancel ongoing analysis
   const cancelAnalysis = useCallback(() => {
@@ -215,9 +296,12 @@ export function CameraView() {
     isAnalysisInProgressRef.current = false;
     setIsAnalyzing(false);
 
+    // Reset voice activation
+    resetActive();
+
     // Announce cancellation
     speakStatus("Cancelando");
-  }, [speakStatus]);
+  }, [speakStatus, resetActive]);
 
   const handleSpeakFeedback = () => {
     if (feedbackText) {
@@ -320,6 +404,14 @@ export function CameraView() {
                   style={{ width: `${audioLevel * 100}%` }}
                 />
               </div>
+            </div>
+          )}
+
+          {/* Voice activation indicator */}
+          {isBackgroundListening && !isListening && !isAnalyzing && (
+            <div className="absolute top-3 left-3 bg-black/50 backdrop-blur-sm rounded-full px-3 py-1.5 flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+              <span className="text-green-400 text-xs">Escuchando comandos de voz</span>
             </div>
           )}
 
@@ -497,7 +589,9 @@ export function CameraView() {
               ? "Analizando... Toca para cancelar"
               : isListening
                 ? "Escuchando... Toca para analizar"
-                : "Toca para hablar"}
+                : isBackgroundListening
+                  ? "Di 'analiza' o toca para hablar"
+                  : "Toca para hablar"}
           </p>
 
           {/* Neumorphic mic button */}
@@ -585,10 +679,10 @@ export function CameraView() {
         </div>
 
         {/* Error messages */}
-        {(cameraError || audioError || geminiError) && (
+        {(cameraError || audioError || geminiError || voiceError) && (
           <div className="mx-4 mt-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2">
             <p style={{ fontSize: "11px" }} className="text-red-600">
-              {cameraError || audioError || geminiError}
+              {cameraError || audioError || geminiError || voiceError}
             </p>
           </div>
         )}
