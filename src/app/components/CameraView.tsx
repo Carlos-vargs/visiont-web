@@ -249,7 +249,7 @@ export function CameraView() {
         style={{ background: "#F8FAFC" }}
       >
         {/* Camera frame */}
-        <div className="mx-4 mt-12 relative overflow-hidden rounded-3xl bg-slate-800 shadow-md" style={{ minHeight: 'calc(100vh - 220px)' }}>
+        <div className="mx-4 mt-12 relative overflow-hidden rounded-3xl bg-slate-800 shadow-md" style={{ minHeight: 'calc(100dvh - 220px)' }}>
           {/* Camera feed - always rendered for videoRef to exist */}
           <video
             ref={videoRef}
