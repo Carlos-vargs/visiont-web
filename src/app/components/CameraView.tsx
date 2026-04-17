@@ -1,13 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { AppHeader } from "./AppHeader";
-import { TopNav } from "./TopNav";
 import { motion, AnimatePresence } from "motion/react";
-import { Flashlight, ZoomIn, Info, Mic, MicOff } from "lucide-react";
+import { Flashlight, ZoomIn, Mic, MicOff } from "lucide-react";
 import { useCamera } from "../hooks/useCamera";
 import { useAudio } from "../hooks/useAudio";
 import { useGemini } from "../hooks/useGemini";
 import { useVoiceActivation } from "../hooks/useVoiceActivation";
-import { FeedbackModal } from "./FeedbackModal";
 
 type BoundingBox = {
   id: number;
@@ -20,27 +18,16 @@ type BoundingBox = {
   confidence: number;
 };
 
-type DetectionResult = {
-  label: string;
-  distance: string;
-  confidence: number;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-};
-
 const isDevelopment = import.meta.env.VITE_ENVIRONMENT !== "production";
 
 export function CameraView() {
   const [activeBoxes, setActiveBoxes] = useState<BoundingBox[]>([]);
   const [scanning, setScanning] = useState(true);
   const [scanLine, setScanLine] = useState(0);
-  const [showFeedback, setShowFeedback] = useState(false);
   const [feedbackText, setFeedbackText] = useState("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isListening, setIsListening] = useState(false);
-  const [voiceActivationEnabled, setVoiceActivationEnabled] = useState(true);
+  const [voiceActivationEnabled] = useState(true);
 
   const captureTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -51,9 +38,7 @@ export function CameraView() {
   const executeSingleAnalysisRef = useRef<
     ((transcript?: string) => Promise<void>) | null
   >(null);
-  const startVoiceListeningRef = useRef<(() => Promise<void>) | null>(null);
 
-  // Keep refs updated
   useEffect(() => {
     isListeningRef.current = isListening;
   }, [isListening]);
@@ -62,11 +47,9 @@ export function CameraView() {
     isAnalyzingRef.current = isAnalyzing;
   }, [isAnalyzing]);
 
-  // Hooks
   const {
     isActive: cameraActive,
     error: cameraError,
-    permissionGranted: cameraPermission,
     flashAvailable,
     flashOn,
     videoRef,
@@ -82,12 +65,8 @@ export function CameraView() {
   });
 
   const {
-    isListening: audioListening,
     isSpeaking: audioSpeaking,
     error: audioError,
-    audioLevel,
-    startListening: startAudioListening,
-    stopListening: stopAudioListening,
     speakText,
     requestMicrophonePermission,
   } = useAudio({
@@ -95,15 +74,8 @@ export function CameraView() {
     enableEchoCancellation: true,
   });
 
-  const {
-    isConnected: geminiConnected,
-    isLoading: geminiLoading,
-    error: geminiError,
-    sendImageWithPrompt,
-    sendTextMessage,
-  } = useGemini();
+  const { error: geminiError, sendImageWithPrompt } = useGemini();
 
-  // Voice activation hook - listens for wake words in background
   const {
     isBackgroundListening,
     isActive: voiceActive,
@@ -111,86 +83,46 @@ export function CameraView() {
     transcript: userTranscript,
     error: voiceError,
     startBackgroundListening,
+    stopBackgroundListening,
+    startManualListening,
+    submitActiveListening,
+    cancelActiveListening,
     resetActive,
   } = useVoiceActivation({
-    silenceTimeout: 4000, // Increased to 4 seconds for better UX
+    silenceTimeout: 3500,
     onActivation: () => {
-      console.log("Wake word detected, auto-activating microphone...");
-      // Only start listening if not already listening or analyzing
-      if (!isListeningRef.current && !isAnalyzingRef.current) {
-        if (startVoiceListeningRef.current) {
-          startVoiceListeningRef.current();
-        }
+      if (!isAnalyzingRef.current) {
+        setIsListening(true);
       }
     },
-    onSilence: (transcript: string) => {
-      console.log(
-        "Silence detected, executing analysis with transcript:",
-        transcript,
-      );
-      // Only execute analysis if currently listening
-      if (isListeningRef.current) {
-        if (executeSingleAnalysisRef.current) {
-          executeSingleAnalysisRef.current(transcript);
-        }
+    onSilence: async (transcript: string) => {
+      setIsListening(false);
+
+      if (executeSingleAnalysisRef.current) {
+        const trimmedTranscript = transcript.trim();
+        await executeSingleAnalysisRef.current(trimmedTranscript || undefined);
       }
     },
   });
 
-  // Log user transcript as they speak
   useEffect(() => {
     if (userTranscript) {
       console.log("[Voice Transcript]", userTranscript);
     }
   }, [userTranscript]);
 
-  // Start listening when voice activation detects wake word
-  const startVoiceListening = useCallback(async () => {
-    const granted = await requestMicrophonePermission();
-    if (granted) {
-      setIsListening(true);
-      startAudioListening();
-      // Announce that we're listening
-      speakStatus("Escuchando");
-    }
-  }, [requestMicrophonePermission, startAudioListening, speakText]);
-
-  // Assign startVoiceListening to ref for voice activation callbacks
   useEffect(() => {
-    startVoiceListeningRef.current = startVoiceListening;
-  }, [startVoiceListening]);
-
-  // Scan line animation
-  useEffect(() => {
-    let prog = 0;
+    let progress = 0;
     const scanInterval = setInterval(() => {
-      prog += 2;
-      setScanLine(prog % 100);
+      progress += 2;
+      setScanLine(progress % 100);
     }, 40);
+
     return () => clearInterval(scanInterval);
   }, []);
 
-  // Camera only activates/deactivates on mount/unmount
-  useEffect(() => {
-    startCamera();
-
-    // Start background voice activation (wake word detection)
-    if (voiceActivationEnabled) {
-      setTimeout(() => {
-        startBackgroundListening();
-      }, 1000); // Delay to let camera initialize
-    }
-
-    return () => {
-      stopCamera();
-      cancelAnalysis();
-    };
-  }, []);
-
-  // Speak status message (non-blocking, fire-and-forget)
   const speakStatus = useCallback(
     async (text: string) => {
-      // Cancel any ongoing speech before speaking new status
       window.speechSynthesis.cancel();
       isSpeakingRef.current = true;
 
@@ -203,10 +135,8 @@ export function CameraView() {
     [speakText],
   );
 
-  // Single analysis - ONE request only, no loops
   const executeSingleAnalysis = useCallback(
-    async (userTranscript?: string) => {
-      // Prevent multiple simultaneous analyses
+    async (spokenTranscript?: string) => {
       if (isAnalysisInProgressRef.current) {
         console.warn("Analysis already in progress, ignoring request");
         return;
@@ -214,174 +144,148 @@ export function CameraView() {
 
       isAnalysisInProgressRef.current = true;
       setIsAnalyzing(true);
+      setIsListening(false);
 
-      // Announce analysis started
       speakStatus("Analizando");
-
-      // Create abort controller for this request
       abortControllerRef.current = new AbortController();
 
       try {
         const frame = captureFrame();
         if (!frame || !abortControllerRef.current) {
-          isAnalysisInProgressRef.current = false;
-          setIsAnalyzing(false);
           return;
         }
 
-        // Build dynamic prompt based on user transcript
-        const basePrompt = "Analiza la imagen de la cámara.";
-        const contextPrompt = userTranscript
-          ? `El usuario dijo: "${userTranscript}". Responde a lo que pide el usuario basándote en lo que ves en la imagen. ` +
-            `Si el usuario pide identificar objetos, proporciona máximo 4 objetos con distancias aproximadas. ` +
-            `Responde en formato JSON con 'feedback' (descripción respondiendo al usuario) y 'detections' (máximo 4 objetos si aplica).`
-          : `Describe lo que ves en esta imagen de la cámara. Identifica máximo 4 objetos principales. ` +
-            `Proporciona distancias aproximadas. Responde en formato JSON con 'feedback' (descripción general) y 'detections' (máximo 4 objetos).`;
+        const prompt = spokenTranscript
+          ? `El usuario dijo: "${spokenTranscript}". Responde a lo que pide el usuario basándote en lo que ves en la imagen. Si el usuario pide identificar objetos, proporciona máximo 4 objetos con distancias aproximadas. Responde en formato JSON con "feedback" y "detections".`
+          : `Describe lo que ves en esta imagen de la cámara. Identifica máximo 4 objetos principales y sus distancias aproximadas. Responde en formato JSON con "feedback" y "detections".`;
 
-        const result = await sendImageWithPrompt(
-          frame,
-          contextPrompt || basePrompt,
-        );
+        const result = await sendImageWithPrompt(frame, prompt);
 
-        // Check if request was cancelled during processing
         if (abortControllerRef.current?.signal.aborted) {
-          console.log("Analysis was cancelled, discarding result");
-          isAnalysisInProgressRef.current = false;
-          setIsAnalyzing(false);
           return;
         }
 
         setFeedbackText(result.feedback);
-        setShowFeedback(true);
 
-        // Limit to 4 detections maximum
-        const maxDetections = result.detections.slice(0, 4);
         const now = Date.now();
-        const boxes: BoundingBox[] = maxDetections.map((det, idx) => ({
-          id: now + idx,
-          ...det,
-          confidence: det.confidence || 90,
-        }));
+        const boxes: BoundingBox[] = result.detections
+          .slice(0, 4)
+          .map((item, index) => ({
+            id: now + index,
+            ...item,
+            confidence: item.confidence || 90,
+          }));
+        setActiveBoxes(boxes);
 
-        if (boxes.length > 0) {
-          setActiveBoxes(boxes);
-        }
-
-        // Speak feedback only if not cancelled and not already speaking
-        if (
-          !abortControllerRef.current?.signal.aborted &&
-          result.feedback &&
-          !isSpeakingRef.current
-        ) {
+        if (result.feedback && !isSpeakingRef.current) {
           isSpeakingRef.current = true;
           await speakText(result.feedback);
           isSpeakingRef.current = false;
         }
 
-        // Reset voice activation after analysis completes
         resetActive();
-      } catch (err: any) {
-        if (err.name === "AbortError") {
-          console.log("Analysis request aborted");
-          // Reset voice activation on abort
-          resetActive();
-        } else {
-          console.error("Error analyzing frame:", err);
-          // Reset voice activation on error
-          resetActive();
+      } catch (error: any) {
+        if (error?.name !== "AbortError") {
+          console.error("Error analyzing frame:", error);
         }
+        resetActive();
       } finally {
         isAnalysisInProgressRef.current = false;
         setIsAnalyzing(false);
         abortControllerRef.current = null;
       }
     },
-    [captureFrame, sendImageWithPrompt, speakText, speakStatus, resetActive],
+    [captureFrame, resetActive, sendImageWithPrompt, speakStatus, speakText],
   );
 
-  // Assign executeSingleAnalysis to ref for voice activation callbacks
   useEffect(() => {
     executeSingleAnalysisRef.current = executeSingleAnalysis;
   }, [executeSingleAnalysis]);
 
-  // Cancel ongoing analysis
   const cancelAnalysis = useCallback(() => {
-    // Only announce cancellation if there was actually something to cancel
     const hadAnalysis =
       isAnalysisInProgressRef.current || abortControllerRef.current;
 
-    // Abort the request if possible
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
 
-    // Stop any pending timeouts
     if (captureTimeoutRef.current) {
       clearTimeout(captureTimeoutRef.current);
       captureTimeoutRef.current = null;
     }
 
-    // Stop speaking if active
     window.speechSynthesis.cancel();
     isSpeakingRef.current = false;
-
-    // Reset states
     isAnalysisInProgressRef.current = false;
     setIsAnalyzing(false);
+    setIsListening(false);
+    void cancelActiveListening();
 
-    // Reset voice activation
-    resetActive();
-
-    // Announce cancellation only if user actually started an analysis
     if (hadAnalysis) {
-      speakStatus("Cancelando");
+      void speakStatus("Cancelando");
     }
-  }, [speakStatus, resetActive]);
+  }, [cancelActiveListening, speakStatus]);
 
-  const handleSpeakFeedback = () => {
-    if (feedbackText) {
-      speakText(feedbackText);
+  useEffect(() => {
+    startCamera();
+
+    if (voiceActivationEnabled) {
+      const timer = setTimeout(() => {
+        startBackgroundListening();
+      }, 1000);
+
+      return () => {
+        clearTimeout(timer);
+        stopBackgroundListening();
+        stopCamera();
+        cancelAnalysis();
+      };
     }
-  };
 
-  // Mic button handler - STRICTLY 1 request per activation
+    return () => {
+      stopCamera();
+      cancelAnalysis();
+    };
+  }, [
+    cancelAnalysis,
+    startBackgroundListening,
+    startCamera,
+    stopBackgroundListening,
+    stopCamera,
+    voiceActivationEnabled,
+  ]);
+
   const handleMicPress = useCallback(async () => {
-    // State 1: Currently analyzing → CANCEL
     if (isAnalyzing) {
       cancelAnalysis();
-      setIsListening(false);
       return;
     }
 
-    // State 2: Currently listening → STOP & EXECUTE ONE ANALYSIS
-    if (isListening) {
-      stopAudioListening();
-      setIsListening(false);
-
-      // Execute EXACTLY ONE analysis - no loops (no transcript from manual press)
-      await executeSingleAnalysis();
+    if (isListening || voiceActive) {
+      await submitActiveListening({ allowEmpty: true });
       return;
     }
 
-    // State 3: Idle → START LISTENING
     const granted = await requestMicrophonePermission();
-    if (granted) {
-      setIsListening(true);
-      startAudioListening();
-      // Announce that we're listening
-      speakStatus("Escuchando, tocar para analizar");
+    if (!granted) {
+      return;
     }
+
+    setIsListening(true);
+    startManualListening();
   }, [
+    cancelAnalysis,
     isAnalyzing,
     isListening,
-    cancelAnalysis,
-    stopAudioListening,
-    executeSingleAnalysis,
     requestMicrophonePermission,
-    startAudioListening,
-    speakStatus,
+    startManualListening,
+    submitActiveListening,
+    voiceActive,
   ]);
+
+  const transcriptToShow = userTranscript.trim() || feedbackText.trim();
 
   return (
     <>
@@ -390,29 +294,25 @@ export function CameraView() {
         className="flex flex-col flex-1 overflow-hidden"
         style={{ background: "#F8FAFC" }}
       >
-        {/* Camera frame */}
         <div
           className="m-4 relative overflow-hidden rounded-3xl bg-slate-800 shadow-md"
           style={{ minHeight: "calc(100dvh - 220px)" }}
         >
-          {/* Camera feed - always rendered for videoRef to exist */}
           <video
             ref={videoRef}
             autoPlay
             playsInline
             muted
-            className="absolute inset-0 w-full h-full object-cover"
+            className="absolute inset-0 h-full w-full object-cover"
             style={{ display: cameraActive ? "block" : "none" }}
           />
 
-          {/* Error overlay */}
           {cameraError && (
-            <div className="absolute inset-0 flex items-center justify-center bg-slate-900 text-white text-center px-4">
+            <div className="absolute inset-0 flex items-center justify-center bg-slate-900 px-4 text-center text-white">
               <span className="text-lg font-semibold">{cameraError}</span>
             </div>
           )}
 
-          {/* Gradient background when camera not active */}
           {!cameraActive && !cameraError && (
             <div
               className="absolute inset-0"
@@ -423,7 +323,6 @@ export function CameraView() {
             />
           )}
 
-          {/* Subtle grid overlay */}
           <div
             className="absolute inset-0 opacity-10"
             style={{
@@ -433,54 +332,60 @@ export function CameraView() {
             }}
           />
 
-          {/* Audio level indicator when listening */}
           {isListening && (
-            <div className="absolute top-3 left-3 bg-black/50 backdrop-blur-sm rounded-full px-3 py-1.5 flex items-center gap-2">
-              <Mic size={12} className="text-red-400" />
-              <div className="w-16 h-1.5 bg-white/20 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-red-400 transition-all duration-100"
-                  style={{ width: `${audioLevel * 100}%` }}
-                />
+            <div className="absolute top-3 left-3 rounded-full bg-black/50 px-3 py-1.5 backdrop-blur-sm">
+              <div className="flex items-center gap-2">
+                <Mic size={12} className="text-red-400" />
+                <div className="h-1.5 w-16 overflow-hidden rounded-full bg-white/20">
+                  <motion.div
+                    className="h-full bg-red-400"
+                    animate={{ width: ["20%", "95%", "35%"] }}
+                    transition={{
+                      duration: 1.2,
+                      repeat: Infinity,
+                      ease: "easeInOut",
+                    }}
+                  />
+                </div>
               </div>
             </div>
           )}
 
-          {/* Voice activation indicator */}
           {isBackgroundListening && !isListening && !isAnalyzing && (
-            <div className="absolute top-3 left-3 bg-black/50 backdrop-blur-sm rounded-full px-3 py-1.5 flex items-center gap-2">
-              <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-              <span className="text-green-400 text-xs">
+            <div className="absolute top-3 left-3 flex items-center gap-2 rounded-full bg-black/50 px-3 py-1.5 backdrop-blur-sm">
+              <div className="h-2 w-2 rounded-full bg-green-400 animate-pulse" />
+              <span className="text-xs text-green-400">
                 Escuchando comandos de voz
               </span>
             </div>
           )}
 
-          {/* Scan line */}
-          {isDevelopment && userTranscript && (
-            <div
-              className="absolute left-4 bottom-4 bg-black bg-opacity-60 text-white px-4 py-2 rounded-xl shadow-lg z-50"
-              style={{ maxWidth: "70%", fontSize: 14, pointerEvents: "none" }}
-              data-testid="transcript-overlay"
-            >
-              <span
-                style={{
-                  fontWeight: "bold",
-                  opacity: 0.7,
-                  fontSize: 12,
-                  marginRight: 6,
-                }}
+          {isDevelopment &&
+            transcriptToShow &&
+            (isListening || voiceProcessing || voiceActive) && (
+              <div
+                className="absolute left-4 bottom-4 z-50 rounded-xl bg-black/60 px-4 py-2 text-white shadow-lg"
+                style={{ maxWidth: "70%", fontSize: 14, pointerEvents: "none" }}
+                data-testid="transcript-overlay"
               >
-                Transcripción:
-              </span>
-              {userTranscript}
-            </div>
-          )}
+                <span
+                  style={{
+                    fontWeight: "bold",
+                    opacity: 0.7,
+                    fontSize: 12,
+                    marginRight: 6,
+                  }}
+                >
+                  Transcripción:
+                </span>
+                {transcriptToShow}
+              </div>
+            )}
 
           <AnimatePresence>
             {scanning && cameraActive && (
               <motion.div
-                className="absolute left-0 right-0 h-px z-10"
+                className="absolute left-0 right-0 z-10 h-px"
                 style={{
                   top: `${scanLine}%`,
                   background:
@@ -491,7 +396,6 @@ export function CameraView() {
             )}
           </AnimatePresence>
 
-          {/* Corner markers */}
           {[
             { top: "8px", left: "8px", borderTop: true, borderLeft: true },
             { top: "8px", right: "8px", borderTop: true, borderRight: true },
@@ -507,7 +411,7 @@ export function CameraView() {
               borderBottom: true,
               borderRight: true,
             },
-          ].map((corner, i) => {
+          ].map((corner, index) => {
             const {
               top,
               left,
@@ -518,10 +422,11 @@ export function CameraView() {
               borderRight,
               borderBottom,
             } = corner;
+
             return (
               <div
-                key={i}
-                className="absolute w-5 h-5"
+                key={index}
+                className="absolute h-5 w-5"
                 style={{
                   ...(top !== undefined ? { top } : {}),
                   ...(left !== undefined ? { left } : {}),
@@ -539,7 +444,6 @@ export function CameraView() {
             );
           })}
 
-          {/* Bounding boxes */}
           <AnimatePresence>
             {cameraActive &&
               activeBoxes.map((box) => (
@@ -556,7 +460,6 @@ export function CameraView() {
                     height: `${box.h}%`,
                   }}
                 >
-                  {/* Dotted border */}
                   <div
                     className="absolute inset-0 rounded-lg"
                     style={{
@@ -566,7 +469,6 @@ export function CameraView() {
                     }}
                   />
 
-                  {/* Label */}
                   <div
                     className="absolute -top-5 left-0 flex items-center gap-1 rounded-md px-1.5 py-0.5"
                     style={{
@@ -575,14 +477,14 @@ export function CameraView() {
                     }}
                   >
                     <span
-                      className="text-blue-300 font-medium"
+                      className="font-medium text-blue-300"
                       style={{ fontSize: "9px", whiteSpace: "nowrap" }}
                     >
                       {box.label}
                     </span>
                     {box.distance && (
                       <>
-                        <span className="w-px h-3 bg-slate-500" />
+                        <span className="h-3 w-px bg-slate-500" />
                         <span
                           className="text-emerald-400"
                           style={{ fontSize: "9px" }}
@@ -593,10 +495,9 @@ export function CameraView() {
                     )}
                   </div>
 
-                  {/* Confidence dot */}
                   {box.confidence >= 90 && (
                     <div
-                      className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-emerald-400"
+                      className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-emerald-400"
                       style={{ boxShadow: "0 0 4px rgba(52,211,153,0.8)" }}
                     />
                   )}
@@ -604,14 +505,12 @@ export function CameraView() {
               ))}
           </AnimatePresence>
 
-          {/* Camera controls overlay */}
           <div className="absolute bottom-3 right-3 flex flex-col gap-2">
-            {/* Flash button - only shown if available */}
             {flashAvailable && (
               <button
                 onClick={toggleFlash}
                 aria-label={flashOn ? "Apagar linterna" : "Encender linterna"}
-                className="w-9 h-9 rounded-full flex items-center justify-center transition-all"
+                className="flex h-9 w-9 items-center justify-center rounded-full transition-all"
                 style={{
                   background: flashOn
                     ? "rgba(251,191,36,0.9)"
@@ -628,7 +527,7 @@ export function CameraView() {
             )}
             <button
               aria-label="Zoom"
-              className="w-9 h-9 rounded-full flex items-center justify-center"
+              className="flex h-9 w-9 items-center justify-center rounded-full"
               style={{
                 background: "rgba(15,23,42,0.6)",
                 backdropFilter: "blur(4px)",
@@ -640,12 +539,13 @@ export function CameraView() {
           </div>
         </div>
 
-        {/* Mic button and quick actions */}
         <div
-          onClick={handleMicPress}
-          className="flex flex-col fixed bottom-0 w-full items-center pb-6 pt-2"
+          onClick={() => {
+            void handleMicPress();
+          }}
+          className="fixed bottom-0 flex w-full flex-col items-center pb-6 pt-2"
         >
-          <p style={{ fontSize: "12px" }} className="text-gray-400 mb-3">
+          <p style={{ fontSize: "12px" }} className="mb-3 text-gray-400">
             {isAnalyzing
               ? "Analizando... Toca para cancelar"
               : isListening
@@ -655,7 +555,6 @@ export function CameraView() {
                   : "Toca para hablar"}
           </p>
 
-          {/* Neumorphic mic button */}
           <motion.button
             whileTap={{ scale: 0.93 }}
             aria-label={
@@ -682,7 +581,6 @@ export function CameraView() {
                   : "8px 8px 16px #d1d9e0, -8px -8px 16px #ffffff",
             }}
           >
-            {/* Pulse rings when analyzing or listening */}
             {(isAnalyzing || isListening) && (
               <>
                 <motion.div
@@ -725,7 +623,7 @@ export function CameraView() {
             ) : isListening ? (
               <MicOff
                 size={30}
-                className="text-white relative z-10"
+                className="relative z-10 text-white"
                 strokeWidth={2}
               />
             ) : (
@@ -739,9 +637,8 @@ export function CameraView() {
           </motion.button>
         </div>
 
-        {/* Error messages */}
         {(cameraError || audioError || geminiError || voiceError) && (
-          <div className="mx-4 mt-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2">
+          <div className="mx-4 mt-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2">
             <p style={{ fontSize: "11px" }} className="text-red-600">
               {cameraError || audioError || geminiError || voiceError}
             </p>
