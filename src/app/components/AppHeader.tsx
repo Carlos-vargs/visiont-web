@@ -19,7 +19,7 @@ export function AppHeader() {
 
   return (
     <header
-      className="w-full px-5 pt-4 pb-3 flex items-center justify-between"
+      className="w-full h-16 px-5 pt-4 pb-3 flex items-center justify-between"
       style={{ background: "#F8FAFC" }}
       aria-label="Encabezado de la aplicación"
     >
