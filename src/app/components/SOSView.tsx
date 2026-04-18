@@ -635,18 +635,6 @@ export function SOSView() {
           </div>
         </div>
 
-        {/* Voice Commands Info */}
-        <div className="mx-5 mb-3">
-          <div className="bg-blue-50 rounded-xl p-3 border border-blue-100">
-            <p style={{ fontSize: "11px" }} className="text-blue-700">
-              🎤 Comandos de voz:{" "}
-              <span className="font-medium">
-                "llamar a [nombre]", "buscar contacto", "emergencia"
-              </span>
-            </p>
-          </div>
-        </div>
-
         {/* Manual Input Fallback */}
         <AnimatePresence>
           {showManualInput && (
@@ -761,16 +749,6 @@ export function SOSView() {
                 </a>
               </motion.div>
             ))}
-
-            {/* Fallback message if no contacts and API not supported */}
-            {!isContactPickerSupported && contacts.length <= 1 && (
-              <div className="bg-amber-50 rounded-2xl p-4 border border-amber-200">
-                <p style={{ fontSize: "12px" }} className="text-amber-700">
-                  💡 La selección de contactos requiere Chrome para Android. Usa
-                  el botón de llamada directa o ingresa el número manualmente.
-                </p>
-              </div>
-            )}
           </div>
         </div>
 
