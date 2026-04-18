@@ -62,12 +62,8 @@ const mergeContacts = (...groups: Contact[][]): Contact[] => {
   }
 
   return Array.from(byPhone.values()).sort((left, right) => {
-    if (left.isEmergency && !right.isEmergency) {
-      return -1;
-    }
-    if (!left.isEmergency && right.isEmergency) {
-      return 1;
-    }
+    if (left.isEmergency && !right.isEmergency) return -1;
+    if (!left.isEmergency && right.isEmergency) return 1;
     return left.name.localeCompare(right.name, "es");
   });
 };
@@ -141,18 +137,32 @@ export function SOSView() {
   const [voiceStatus, setVoiceStatus] = useState("");
   const [showManualInput, setShowManualInput] = useState(false);
   const [isListening, setIsListening] = useState(false);
+  const [isProcessingVoice, setIsProcessingVoice] = useState(false);
 
   const isSpeakingRef = useRef(false);
   const isListeningRef = useRef(false);
-  const isProcessingCommandRef = useRef(false);
+  const isProcessingVoiceRef = useRef(false);
   const contactsRef = useRef<Contact[]>(initialContacts);
   const sosActiveRef = useRef(sosActive);
   const pendingCallNameRef = useRef<string | null>(null);
-  const finishVoiceCommandRef = useRef<((transcript: string) => void) | null>(
-    null,
-  );
+  const executeVoiceCommandRef = useRef<
+    ((transcript?: string) => Promise<void>) | null
+  >(null);
   const startVoiceListeningRef = useRef<(() => Promise<void>) | null>(null);
 
+  useEffect(() => {
+    isListeningRef.current = isListening;
+  }, [isListening]);
+
+  useEffect(() => {
+    isProcessingVoiceRef.current = isProcessingVoice;
+  }, [isProcessingVoice]);
+
+  useEffect(() => {
+    sosActiveRef.current = sosActive;
+  }, [sosActive]);
+
+  // Hooks
   const {
     isSupported: isContactPickerSupported,
     isLoading: isContactPickerLoading,
@@ -160,7 +170,6 @@ export function SOSView() {
     savedContacts,
     deviceContacts,
     permissionStatus,
-    isNativeBridgeAvailable,
     canAutoDial,
     canListDeviceContacts,
     clearError: clearContactPickerError,
@@ -199,19 +208,11 @@ export function SOSView() {
     contactsRef.current = contacts;
   }, [contacts]);
 
-  useEffect(() => {
-    sosActiveRef.current = sosActive;
-  }, [sosActive]);
-
-  useEffect(() => {
-    isListeningRef.current = isListening;
-  }, [isListening]);
-
-  const speakFeedback = useCallback(
+  // speakStatus - patron identico a CameraView
+  const speakStatus = useCallback(
     async (text: string) => {
       window.speechSynthesis.cancel();
       isSpeakingRef.current = true;
-
       try {
         await speakText(text);
       } finally {
@@ -221,221 +222,21 @@ export function SOSView() {
     [speakText],
   );
 
-  const startVoiceListening = useCallback(async () => {
-    clearContactPickerError();
-    setShowManualInput(false);
-
-    const granted = await requestMicrophonePermission();
-    if (!granted) {
-      setVoiceStatus("Permiso de micrófono denegado");
-      return;
-    }
-
-    await startAudioListening();
-    setIsListening(true);
-    setVoiceStatus("Escuchando comando...");
-    void speakFeedback("Escuchando");
-  }, [
-    clearContactPickerError,
-    requestMicrophonePermission,
-    speakFeedback,
-    startAudioListening,
-  ]);
-
-  useEffect(() => {
-    startVoiceListeningRef.current = startVoiceListening;
-  }, [startVoiceListening]);
-
+  // Countdown SOS
   useEffect(() => {
     if (!sosActive) {
       setCountdown(5);
       return;
     }
-
     if (countdown <= 0) {
       setLocationShared(true);
       setMessageSent(true);
-      void speakFeedback("Alerta de emergencia enviada. Ayuda en camino.");
+      void speakStatus("Alerta de emergencia enviada. Ayuda en camino.");
       return;
     }
-
-    const timer = setTimeout(
-      () => setCountdown((current) => current - 1),
-      1000,
-    );
+    const timer = setTimeout(() => setCountdown((c) => c - 1), 1000);
     return () => clearTimeout(timer);
-  }, [countdown, sosActive, speakFeedback]);
-
-  const stopVoiceListening = useCallback(() => {
-    stopAudioListening();
-    setIsListening(false);
-  }, [stopAudioListening]);
-
-  const finishVoiceCommand = useCallback(
-    async (transcript: string) => {
-      const command = transcript.trim();
-      if (!command || isProcessingCommandRef.current) {
-        return;
-      }
-
-      isProcessingCommandRef.current = true;
-      setVoiceStatus("Procesando comando...");
-      stopVoiceListening();
-
-      try {
-        await handleVoiceCommand(command);
-      } finally {
-        isProcessingCommandRef.current = false;
-        resetActive();
-      }
-    },
-    [resetActive, stopVoiceListening],
-  );
-
-  useEffect(() => {
-    finishVoiceCommandRef.current = (transcript: string) => {
-      void finishVoiceCommand(transcript);
-    };
-  }, [finishVoiceCommand]);
-
-  const handleEmptyVoiceCommand = useCallback(() => {
-    const message =
-      "No escuché un comando. Puedes decir llama a mamá o activa emergencia.";
-    setVoiceStatus(message);
-    void speakFeedback(message);
-  }, [speakFeedback]);
-
-  const handleVoiceStatus = useCallback((message: string) => {
-    setVoiceStatus(message);
-  }, []);
-
-  const speakFeedbackLegacy = useCallback((text: string) => {
-    try {
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = "es-ES";
-      utterance.rate = 0.95;
-
-      utterance.onstart = () => {
-        isSpeakingRef.current = true;
-      };
-      utterance.onend = () => {
-        isSpeakingRef.current = false;
-      };
-      utterance.onerror = () => {
-        isSpeakingRef.current = false;
-      };
-
-      window.speechSynthesis.speak(utterance);
-    } catch (error) {
-      console.warn("Speech synthesis error:", error);
-      isSpeakingRef.current = false;
-    }
-  }, []);
-
-  const {
-    isBackgroundListening,
-    isActive: voiceActive,
-    isManualListening,
-    isProcessing: voiceProcessing,
-    transcript: userTranscript,
-    error: voiceError,
-    startBackgroundListening,
-    stopBackgroundListening,
-    startManualListening,
-    submitActiveListening,
-  } = useVoiceActivation({
-    wakeWords: [
-      "ayuda",
-      "emergencia",
-      "sos",
-      "llama a",
-      "llamar a",
-      "marca a",
-      "buscar contacto",
-      "busca a",
-      "agregar contacto",
-      "agrega a",
-      "sincroniza contactos",
-      "contacto",
-    ],
-    silenceTimeout: 2600,
-    onActivation: () => {
-      setVoiceStatus("Escuchando comando...");
-      clearContactPickerError();
-    },
-    onSilence: async (transcript: string) => {
-      setVoiceStatus("Procesando comando...");
-      await handleVoiceCommand(transcript);
-    },
-  });
-
-  useEffect(() => {
-    let isMounted = true;
-
-    const enableBackgroundListeningIfPossible = async () => {
-      try {
-        if (!navigator.permissions?.query) {
-          if (isMounted) {
-            setVoiceStatus("Toca el micrófono para habilitar comandos de voz");
-          }
-          return;
-        }
-
-        const permission = await navigator.permissions.query({
-          name: "microphone" as PermissionName,
-        });
-
-        if (!isMounted) {
-          return;
-        }
-
-        if (permission.state === "granted") {
-          startBackgroundListening();
-          setVoiceStatus("");
-        } else {
-          setVoiceStatus("Toca el micrófono para habilitar comandos de voz");
-        }
-      } catch {
-        if (isMounted) {
-          setVoiceStatus("Toca el micrófono para habilitar comandos de voz");
-        }
-      }
-    };
-
-    void enableBackgroundListeningIfPossible();
-
-    return () => {
-      isMounted = false;
-      stopBackgroundListening();
-    };
-  }, [startBackgroundListening, stopBackgroundListening]);
-
-  useEffect(() => {
-    if (
-      permissionStatus === "granted" &&
-      canListDeviceContacts &&
-      deviceContacts.length === 0
-    ) {
-      void refreshDeviceContacts();
-    }
-  }, [
-    canListDeviceContacts,
-    deviceContacts.length,
-    permissionStatus,
-    refreshDeviceContacts,
-  ]);
-
-  useEffect(() => {
-    if (voiceActive && userTranscript) {
-      setVoiceStatus(userTranscript);
-    }
-  }, [userTranscript, voiceActive]);
-
-  useEffect(() => {
-    if (voiceError) {
-      setVoiceStatus(voiceError);
-    }
-  }, [voiceError]);
+  }, [countdown, sosActive, speakStatus]);
 
   const cancelSOS = useCallback(() => {
     setSosActive(false);
@@ -448,27 +249,23 @@ export function SOSView() {
   const requestAndSyncContacts = useCallback(async () => {
     setVoiceStatus("Solicitando permiso para leer contactos...");
     const result = await requestContactsAccess();
-
     if (result.granted) {
       const total = result.contacts.length;
       const message =
         total > 0
-          ? `Sincronicé ${total} contactos del dispositivo`
-          : "Permiso concedido, pero no encontré contactos";
+          ? `Sincronice ${total} contactos del dispositivo`
+          : "Permiso concedido, pero no encontre contactos";
       setVoiceStatus(message);
-      speakFeedback(message);
+      void speakStatus(message);
       return result.contacts;
     }
-
     return [];
-  }, [requestContactsAccess, speakFeedback]);
+  }, [requestContactsAccess, speakStatus]);
 
   const resolveContactByName = useCallback(
     async (contactName: string) => {
       let contact = findContactByName(contactName, contactsRef.current);
-      if (contact) {
-        return contact;
-      }
+      if (contact) return contact;
 
       if (canListDeviceContacts) {
         const freshContacts =
@@ -483,7 +280,6 @@ export function SOSView() {
           );
         }
       }
-
       return contact;
     },
     [
@@ -498,22 +294,20 @@ export function SOSView() {
   const callContact = useCallback(
     async (phone: string, name: string) => {
       if (!phone) {
-        const message = "No hay número disponible para este contacto";
+        const message = "No hay numero disponible para este contacto";
         setVoiceStatus(message);
-        speakFeedback(message);
+        void speakStatus(message);
         setShowManualInput(true);
         return false;
       }
-
       const message = canAutoDial
-        ? `Llamando automáticamente a ${name}`
-        : `Abriendo la app del teléfono para llamar a ${name}`;
-
+        ? `Llamando automaticamente a ${name}`
+        : `Abriendo la app del telefono para llamar a ${name}`;
       setVoiceStatus(message);
-      speakFeedback(message);
+      void speakStatus(message);
       return await triggerCall(phone, name);
     },
-    [canAutoDial, speakFeedback, triggerCall],
+    [canAutoDial, speakStatus, triggerCall],
   );
 
   const handleVoiceCommand = useCallback(
@@ -525,34 +319,33 @@ export function SOSView() {
         if (!sosActiveRef.current) {
           setSosActive(true);
           setVoiceStatus("Activando emergencia");
-          speakFeedback("Activando emergencia");
+          void speakStatus("Activando emergencia");
         }
         return;
       }
 
       if (intent.type === "cancel_sos" && sosActiveRef.current) {
         cancelSOS();
-        speakFeedback("Emergencia cancelada");
+        void speakStatus("Emergencia cancelada");
         return;
       }
 
       if (intent.type === "call") {
         const contact = await resolveContactByName(intent.contactName);
-
         if (contact) {
           pendingCallNameRef.current = null;
           await callContact(contact.phone, contact.name);
         } else if (isContactPickerSupported || canListDeviceContacts) {
           pendingCallNameRef.current = intent.contactName;
-          const message = `No encontré a ${intent.contactName}. Toca Agregar para elegirlo o sincroniza contactos.`;
+          const message = `No encontre a ${intent.contactName}. Toca Agregar para elegirlo o sincroniza contactos.`;
           setVoiceStatus(message);
-          speakFeedback(message);
+          void speakStatus(message);
         } else {
           pendingCallNameRef.current = intent.contactName;
           setShowManualInput(true);
-          const message = `No puedo leer tus contactos aquí. Ingresa el número manualmente para ${intent.contactName}.`;
+          const message = `No puedo leer tus contactos aqui. Ingresa el numero manualmente para ${intent.contactName}.`;
           setVoiceStatus(message);
-          speakFeedback(message);
+          void speakStatus(message);
         }
         return;
       }
@@ -561,29 +354,28 @@ export function SOSView() {
         if (intent.contactName) {
           const contact = await resolveContactByName(intent.contactName);
           if (contact) {
-            const message = `Encontré a ${contact.name} con número ${contact.phone}`;
+            const message = `Encontre a ${contact.name} con numero ${contact.phone}`;
             setVoiceStatus(message);
-            speakFeedback(message);
+            void speakStatus(message);
           } else {
-            const message = `No encontré a ${intent.contactName}.`;
+            const message = `No encontre a ${intent.contactName}.`;
             setVoiceStatus(message);
-            speakFeedback(message);
+            void speakStatus(message);
           }
           return;
         }
-
         if (canListDeviceContacts) {
           await requestAndSyncContacts();
         } else if (isContactPickerSupported) {
           const message = "Toca Agregar para seleccionar un contacto.";
           setVoiceStatus(message);
-          speakFeedback(message);
+          void speakStatus(message);
         } else {
           setShowManualInput(true);
           const message =
-            "Este dispositivo no permite abrir contactos. Ingresa el número manualmente.";
+            "Este dispositivo no permite abrir contactos. Ingresa el numero manualmente.";
           setVoiceStatus(message);
-          speakFeedback(message);
+          void speakStatus(message);
         }
         return;
       }
@@ -599,63 +391,209 @@ export function SOSView() {
             });
             const message = `${contact.name} fue agregado como contacto de emergencia`;
             setVoiceStatus(message);
-            speakFeedback(message);
+            void speakStatus(message);
           } else {
-            const message = `No encontré a ${intent.contactName}. Toca Agregar para seleccionarlo manualmente.`;
+            const message = `No encontre a ${intent.contactName}. Toca Agregar para seleccionarlo manualmente.`;
             setVoiceStatus(message);
-            speakFeedback(message);
+            void speakStatus(message);
           }
           return;
         }
-
         if (normalized.includes("sincroniza") && canListDeviceContacts) {
           await requestAndSyncContacts();
           return;
         }
-
         const message = canListDeviceContacts
           ? "Toca Permitir o Agregar para seleccionar un contacto del dispositivo."
           : "Toca Agregar para seleccionar un contacto.";
         setVoiceStatus(message);
-        speakFeedback(message);
+        void speakStatus(message);
         return;
       }
 
       const helpMessage =
-        "Puedes decir llama a mamá, marca a Juan, agrega contacto o activa emergencia.";
+        "Puedes decir llama a mama, marca a Juan, agrega contacto o activa emergencia.";
       setVoiceStatus(helpMessage);
-      speakFeedback(helpMessage);
+      void speakStatus(helpMessage);
     },
     [
       callContact,
-      canListDeviceContacts,
       cancelSOS,
+      canListDeviceContacts,
       isContactPickerSupported,
       parseContactName,
       requestAndSyncContacts,
       resolveContactByName,
       saveContact,
-      speakFeedback,
+      speakStatus,
     ],
   );
 
-  const handleMicPress = useCallback(() => {
-    clearContactPickerError();
+  // Voice activation - mismo patron que CameraView con refs para evitar stale closures
+  const {
+    isBackgroundListening,
+    isActive: voiceActive,
+    isProcessing: voiceProcessing,
+    transcript: userTranscript,
+    error: voiceError,
+    startBackgroundListening,
+    resetActive,
+  } = useVoiceActivation({
+    wakeWords: [
+      "ayuda",
+      "emergencia",
+      "sos",
+      "llama a",
+      "llamar a",
+      "marca a",
+      "buscar contacto",
+      "busca a",
+      "agregar contacto",
+      "agrega a",
+      "sincroniza contactos",
+      "contacto",
+    ],
+    silenceTimeout: 4000,
+    onActivation: () => {
+      console.log("Wake word detected, activating microphone...");
+      if (!isListeningRef.current && !isProcessingVoiceRef.current) {
+        if (startVoiceListeningRef.current) {
+          startVoiceListeningRef.current();
+        }
+      }
+    },
+    onSilence: (transcript: string) => {
+      console.log("Silence detected, processing transcript:", transcript);
+      if (isListeningRef.current) {
+        if (executeVoiceCommandRef.current) {
+          executeVoiceCommandRef.current(transcript);
+        }
+      }
+    },
+  });
 
-    if (voiceActive) {
-      setVoiceStatus("Procesando comando...");
-      void submitActiveListening();
+  // executeVoiceCommand - analogo a executeSingleAnalysis en CameraView
+  const executeVoiceCommand = useCallback(
+    async (transcript?: string) => {
+      if (isProcessingVoiceRef.current) {
+        console.warn("Voice command already in progress, ignoring request");
+        return;
+      }
+
+      isProcessingVoiceRef.current = true;
+      setIsProcessingVoice(true);
+      setIsListening(false);
+      stopAudioListening();
+
+      void speakStatus("Procesando");
+
+      try {
+        if (transcript?.trim()) {
+          await handleVoiceCommand(transcript);
+        } else {
+          const message =
+            "No escuche un comando. Puedes decir llama a mama o activa emergencia.";
+          setVoiceStatus(message);
+          void speakStatus(message);
+        }
+        resetActive();
+      } catch (err: any) {
+        console.error("Error processing voice command:", err);
+        resetActive();
+      } finally {
+        isProcessingVoiceRef.current = false;
+        setIsProcessingVoice(false);
+      }
+    },
+    [handleVoiceCommand, resetActive, speakStatus, stopAudioListening],
+  );
+
+  useEffect(() => {
+    executeVoiceCommandRef.current = executeVoiceCommand;
+  }, [executeVoiceCommand]);
+
+  // startVoiceListening - mismo patron que CameraView
+  const startVoiceListening = useCallback(async () => {
+    const granted = await requestMicrophonePermission();
+    if (granted) {
+      setIsListening(true);
+      startAudioListening();
+      void speakStatus("Escuchando");
+    }
+  }, [requestMicrophonePermission, speakStatus, startAudioListening]);
+
+  useEffect(() => {
+    startVoiceListeningRef.current = startVoiceListening;
+  }, [startVoiceListening]);
+
+  // Iniciar escucha en background al montar
+  useEffect(() => {
+    startBackgroundListening();
+  }, []);
+
+  // Sincronizar contactos cuando hay permiso
+  useEffect(() => {
+    if (
+      permissionStatus === "granted" &&
+      canListDeviceContacts &&
+      deviceContacts.length === 0
+    ) {
+      void refreshDeviceContacts();
+    }
+  }, [
+    canListDeviceContacts,
+    deviceContacts.length,
+    permissionStatus,
+    refreshDeviceContacts,
+  ]);
+
+  // Log transcripts
+  useEffect(() => {
+    if (userTranscript) {
+      console.log("[Voice Transcript]", userTranscript);
+    }
+  }, [userTranscript]);
+
+  // handleMicPress - mismo patron de 3 estados que CameraView
+  const handleMicPress = useCallback(async () => {
+    clearContactPickerError();
+    setShowManualInput(false);
+
+    // Estado 1: Procesando -> CANCELAR
+    if (isProcessingVoice) {
+      window.speechSynthesis.cancel();
+      isProcessingVoiceRef.current = false;
+      setIsProcessingVoice(false);
+      resetActive();
+      void speakStatus("Cancelando");
       return;
     }
 
-    setShowManualInput(false);
-    setVoiceStatus("Habla ahora...");
-    startManualListening();
+    // Estado 2: Escuchando -> DETENER Y PROCESAR
+    if (isListening) {
+      stopAudioListening();
+      setIsListening(false);
+      await executeVoiceCommand();
+      return;
+    }
+
+    // Estado 3: Idle -> INICIAR ESCUCHA
+    const granted = await requestMicrophonePermission();
+    if (granted) {
+      setIsListening(true);
+      startAudioListening();
+      void speakStatus("Escuchando, toca para procesar");
+    }
   }, [
     clearContactPickerError,
-    startManualListening,
-    submitActiveListening,
-    voiceActive,
+    executeVoiceCommand,
+    isListening,
+    isProcessingVoice,
+    requestMicrophonePermission,
+    resetActive,
+    speakStatus,
+    startAudioListening,
+    stopAudioListening,
   ]);
 
   const handleEnableContacts = useCallback(async () => {
@@ -668,14 +606,13 @@ export function SOSView() {
     const refreshed = await refreshDeviceContacts();
     const message =
       refreshed.length > 0
-        ? `Actualicé ${refreshed.length} contactos del dispositivo`
-        : "No encontré contactos para sincronizar";
+        ? `Actualice ${refreshed.length} contactos del dispositivo`
+        : "No encontre contactos para sincronizar";
     setVoiceStatus(message);
   }, [clearContactPickerError, refreshDeviceContacts]);
 
   const handleAddContactManual = useCallback(async () => {
     clearContactPickerError();
-
     const contact = await pickContact();
     if (!contact) {
       if (!isContactPickerSupported && !canListDeviceContacts) {
@@ -683,10 +620,8 @@ export function SOSView() {
       }
       return;
     }
-
     setVoiceStatus(`Contacto ${contact.name} agregado`);
-    speakFeedback(`Contacto ${contact.name} agregado`);
-
+    void speakStatus(`Contacto ${contact.name} agregado`);
     if (pendingCallNameRef.current) {
       pendingCallNameRef.current = null;
       await callContact(contact.phone, contact.name);
@@ -697,16 +632,13 @@ export function SOSView() {
     clearContactPickerError,
     isContactPickerSupported,
     pickContact,
-    speakFeedback,
+    speakStatus,
   ]);
 
   const handleManualCall = useCallback(async () => {
-    if (!manualPhone.trim()) {
-      return;
-    }
-
+    if (!manualPhone.trim()) return;
     pendingCallNameRef.current = null;
-    await callContact(manualPhone, "ese número");
+    await callContact(manualPhone, "ese numero");
     setManualPhone("");
     setShowManualInput(false);
   }, [callContact, manualPhone]);
@@ -769,7 +701,7 @@ export function SOSView() {
             <motion.button
               whileTap={{ scale: 0.95 }}
               onClick={() => !sosActive && setSosActive(true)}
-              aria-label="Activar botón de emergencia SOS"
+              aria-label="Activar boton de emergencia SOS"
               aria-pressed={sosActive}
               className="relative flex h-28 w-28 flex-col items-center justify-center rounded-full focus:outline-none focus-visible:ring-4 focus-visible:ring-red-400"
               style={{
@@ -805,7 +737,7 @@ export function SOSView() {
                 style={{ fontSize: "13px" }}
                 className="text-center text-gray-500"
               >
-                Toca el botón para enviar una señal de emergencia
+                Toca el boton para enviar una senal de emergencia
               </motion.p>
             ) : countdown > 0 ? (
               <motion.div
@@ -842,7 +774,7 @@ export function SOSView() {
                   style={{ fontSize: "15px" }}
                   className="font-medium text-red-600"
                 >
-                  ¡Alerta enviada!
+                  Alerta enviada
                 </p>
                 <p style={{ fontSize: "12px" }} className="text-gray-500">
                   Los servicios de emergencia han sido notificados
@@ -879,7 +811,7 @@ export function SOSView() {
                   locationShared ? "text-emerald-700" : "text-gray-400"
                 }`}
               >
-                Ubicación
+                Ubicacion
               </p>
               <p
                 style={{ fontSize: "11px" }}
@@ -936,11 +868,11 @@ export function SOSView() {
                 </p>
                 <p style={{ fontSize: "11px" }} className="text-gray-500">
                   Esto permite buscar contactos por voz y marcar
-                  automáticamente.
+                  automaticamente.
                 </p>
               </div>
               <button
-                onClick={handleEnableContacts}
+                onClick={() => void handleEnableContacts()}
                 disabled={isContactPickerLoading}
                 className="rounded-full bg-blue-600 px-3 py-1.5 text-xs font-medium text-white transition-colors active:bg-blue-700 disabled:opacity-50"
               >
@@ -960,21 +892,19 @@ export function SOSView() {
             >
               <div className="rounded-2xl border border-gray-200 bg-white p-4">
                 <p style={{ fontSize: "12px" }} className="mb-3 text-gray-600">
-                  Ingresa el número manualmente:
+                  Ingresa el numero manualmente:
                 </p>
                 <div className="flex gap-2">
                   <input
                     type="tel"
                     value={manualPhone}
                     onChange={(event) => setManualPhone(event.target.value)}
-                    placeholder="+56 9 1234 5678"
+                    placeholder="+57 310 123 4567"
                     className="flex-1 rounded-xl border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
                     style={{ background: "#F8FAFC" }}
                   />
                   <button
-                    onClick={() => {
-                      void handleManualCall();
-                    }}
+                    onClick={() => void handleManualCall()}
                     disabled={!manualPhone.trim()}
                     className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors active:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
                   >
@@ -1003,7 +933,7 @@ export function SOSView() {
             <div className="flex items-center gap-2">
               {permissionStatus === "granted" && canListDeviceContacts && (
                 <button
-                  onClick={handleRefreshContacts}
+                  onClick={() => void handleRefreshContacts()}
                   disabled={isContactPickerLoading}
                   className="flex items-center gap-1 text-slate-500 transition-colors hover:text-slate-700 disabled:opacity-50"
                   style={{ fontSize: "11px" }}
@@ -1013,9 +943,7 @@ export function SOSView() {
                 </button>
               )}
               <button
-                onClick={() => {
-                  void handleAddContactManual();
-                }}
+                onClick={() => void handleAddContactManual()}
                 disabled={isContactPickerLoading}
                 className="flex items-center gap-1 text-blue-600 transition-colors hover:text-blue-700 disabled:opacity-50"
                 style={{ fontSize: "11px" }}
@@ -1066,9 +994,7 @@ export function SOSView() {
                 <button
                   type="button"
                   aria-label={`Llamar a ${contact.name}`}
-                  onClick={() => {
-                    void callContact(contact.phone, contact.name);
-                  }}
+                  onClick={() => void callContact(contact.phone, contact.name)}
                   className={`flex h-8 w-8 items-center justify-center rounded-full transition-colors ${
                     contact.isEmergency
                       ? "bg-red-500 active:bg-red-600"
@@ -1082,44 +1008,64 @@ export function SOSView() {
           </div>
         </div>
 
-        <div className="pointer-events-none fixed bottom-0 left-0 right-0 flex flex-col items-center pb-6 pt-2">
+        {/* Mic button - mismo patron de 3 estados que CameraView */}
+        <div
+          onClick={() => void handleMicPress()}
+          className="flex flex-col fixed bottom-0 w-full items-center pb-6 pt-2 pointer-events-none"
+        >
           <p
             style={{ fontSize: "12px" }}
-            className="pointer-events-auto mb-3 text-gray-400"
+            className="text-gray-400 mb-3 pointer-events-auto"
           >
-            {voiceProcessing
-              ? "Procesando..."
-              : voiceActive
-                ? "Escuchando... toca de nuevo para enviar"
+            {isProcessingVoice
+              ? "Procesando... Toca para cancelar"
+              : isListening
+                ? "Escuchando... Toca para procesar"
                 : isBackgroundListening
-                  ? "Di 'llama a mamá' o toca para hablar"
+                  ? "Di 'llama a mama' o toca para hablar"
                   : "Toca para habilitar comandos de voz"}
           </p>
 
+          {/* Indicador de nivel de audio cuando escucha */}
+          {isListening && (
+            <div className="mb-2 bg-black/50 backdrop-blur-sm rounded-full px-3 py-1.5 flex items-center gap-2 pointer-events-none">
+              <Mic size={12} className="text-blue-400" />
+              <div className="w-16 h-1.5 bg-white/20 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-blue-400 transition-all duration-100"
+                  style={{ width: `${audioLevel * 100}%` }}
+                />
+              </div>
+            </div>
+          )}
+
           <motion.button
             whileTap={{ scale: 0.93 }}
-            onClick={handleMicPress}
             aria-label={
-              voiceActive || isManualListening
-                ? "Enviar comando de voz"
-                : "Activar comando de voz"
+              isProcessingVoice
+                ? "Cancelar procesamiento"
+                : isListening
+                  ? "Detener y procesar"
+                  : "Activar microfono"
             }
-            aria-pressed={voiceActive || isManualListening}
+            aria-pressed={isListening || isProcessingVoice}
             className="pointer-events-auto relative flex items-center justify-center rounded-full transition-all duration-200 focus:outline-none focus-visible:ring-4 focus-visible:ring-blue-400"
             style={{
               width: 72,
               height: 72,
-              background:
-                voiceActive || isManualListening
+              background: isProcessingVoice
+                ? "linear-gradient(145deg, #F59E0B, #D97706)"
+                : isListening
                   ? "linear-gradient(145deg, #3B82F6, #2563EB)"
                   : "#F1F5F9",
-              boxShadow:
-                voiceActive || isManualListening
+              boxShadow: isProcessingVoice
+                ? "0 8px 24px rgba(245,158,11,0.45), inset 0 1px 0 rgba(255,255,255,0.2)"
+                : isListening
                   ? "0 8px 24px rgba(59,130,246,0.45), inset 0 1px 0 rgba(255,255,255,0.2)"
                   : "8px 8px 16px #d1d9e0, -8px -8px 16px #ffffff",
             }}
           >
-            {(voiceActive || isManualListening) && (
+            {(isListening || isProcessingVoice) && (
               <>
                 <motion.div
                   className="absolute inset-0 rounded-full bg-white/30"
@@ -1143,12 +1089,31 @@ export function SOSView() {
               </>
             )}
 
-            {isBackgroundListening && !voiceActive && !isManualListening && (
+            {isBackgroundListening && !isListening && !isProcessingVoice && (
               <div className="absolute -right-1 -top-1 h-3 w-3 rounded-full border-2 border-white bg-green-400 animate-pulse" />
             )}
 
-            {voiceActive || isManualListening ? (
-              <MicOff size={28} className="relative z-10 text-white" />
+            {isProcessingVoice ? (
+              <svg
+                width="28"
+                height="28"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="white"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="relative z-10"
+              >
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            ) : isListening ? (
+              <MicOff
+                size={28}
+                className="text-white relative z-10"
+                strokeWidth={2}
+              />
             ) : (
               <Mic
                 size={28}
@@ -1160,22 +1125,13 @@ export function SOSView() {
           </motion.button>
         </div>
 
-        <AnimatePresence>
-          {voiceError && (
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0 }}
-              className="fixed bottom-24 left-5 right-5"
-            >
-              <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3">
-                <p style={{ fontSize: "12px" }} className="text-red-600">
-                  {voiceError}
-                </p>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+        {(audioError || voiceError) && (
+          <div className="mx-4 mt-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2">
+            <p style={{ fontSize: "11px" }} className="text-red-600">
+              {audioError || voiceError}
+            </p>
+          </div>
+        )}
       </div>
 
       <TopNav />
