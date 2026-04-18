@@ -9,14 +9,6 @@ type VoiceActivationOptions = {
 };
 
 type RecognitionMode = "idle" | "wake" | "manual";
-type RecognitionStatus = "idle" | "starting" | "running" | "stopping";
-type SubmitOptions = {
-  allowEmpty?: boolean;
-};
-
-const RESTART_DELAY_MS = 450;
-const IGNORE_RESULTS_DELAY_MS = 1200;
-const DUPLICATE_WAKE_WORD_WINDOW_MS = 1500;
 
 const normalizeText = (value: string): string =>
   value
@@ -74,17 +66,14 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
 
   const recognitionRef = useRef<any>(null);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const shouldKeepRecognitionAliveRef = useRef(false);
-  const recognitionStatusRef = useRef<RecognitionStatus>("idle");
   const isActiveRef = useRef(false);
   const transcriptPartsRef = useRef<string[]>([]);
-  const transcriptSetRef = useRef<Set<string>>(new Set());
   const interimTranscriptRef = useRef("");
+  const lastFinalChunkRef = useRef("");
   const ignoreResultsUntilRef = useRef(0);
   const optionsRef = useRef(options);
   const modeRef = useRef<RecognitionMode>("idle");
-  const lastWakeActivationRef = useRef({ text: "", at: 0 });
 
   useEffect(() => {
     optionsRef.current = options;
@@ -97,17 +86,10 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     }
   }, []);
 
-  const clearRestartTimer = useCallback(() => {
-    if (restartTimerRef.current) {
-      clearTimeout(restartTimerRef.current);
-      restartTimerRef.current = null;
-    }
-  }, []);
-
   const clearTranscriptBuffers = useCallback(() => {
     transcriptPartsRef.current = [];
-    transcriptSetRef.current = new Set();
     interimTranscriptRef.current = "";
+    lastFinalChunkRef.current = "";
     setTranscript("");
   }, []);
 
@@ -118,38 +100,46 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
   }, []);
 
   const completeActiveListening = useCallback(
-    async (shouldSubmit: boolean, allowEmpty = false) => {
+    async (shouldSubmit: boolean) => {
       clearSilenceTimer();
 
-      const submittedTranscript = joinTranscript([
+      const fullTranscript = joinTranscript([
         ...transcriptPartsRef.current,
         interimTranscriptRef.current,
       ]);
 
-      if (!isActiveRef.current && !submittedTranscript) {
+      if (!isActiveRef.current && !fullTranscript) {
         return;
       }
 
-      ignoreResultsUntilRef.current = Date.now() + IGNORE_RESULTS_DELAY_MS;
+      ignoreResultsUntilRef.current = Date.now() + 300;
       isActiveRef.current = false;
       modeRef.current = "idle";
       setIsActive(false);
       setIsManualListening(false);
       clearTranscriptBuffers();
 
-      if (!shouldSubmit || (!submittedTranscript && !allowEmpty)) {
+      if (!shouldSubmit || !fullTranscript) {
         return;
       }
 
       try {
         setIsProcessing(true);
-        await optionsRef.current.onSilence?.(submittedTranscript);
+        await optionsRef.current.onSilence?.(fullTranscript);
       } finally {
         setIsProcessing(false);
       }
     },
     [clearSilenceTimer, clearTranscriptBuffers],
   );
+
+  const submitActiveListening = useCallback(async () => {
+    await completeActiveListening(true);
+  }, [completeActiveListening]);
+
+  const cancelActiveListening = useCallback(() => {
+    void completeActiveListening(false);
+  }, [completeActiveListening]);
 
   const scheduleSilenceTimeout = useCallback(() => {
     clearSilenceTimer();
@@ -166,9 +156,9 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
       setIsManualListening(mode === "manual");
       clearTranscriptBuffers();
 
-      const initial = joinTranscript([initialTranscript]);
-      if (initial) {
-        interimTranscriptRef.current = initial;
+      const normalizedInitial = joinTranscript([initialTranscript]);
+      if (normalizedInitial) {
+        interimTranscriptRef.current = normalizedInitial;
         updateTranscriptState();
       }
 
@@ -178,241 +168,160 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     [clearTranscriptBuffers, scheduleSilenceTimeout, updateTranscriptState],
   );
 
-  const handleRecognitionResult = useCallback(
-    (event: any) => {
-      if (Date.now() < ignoreResultsUntilRef.current) {
+  const startBackgroundListening = useCallback(() => {
+    try {
+      setError(null);
+      shouldKeepRecognitionAliveRef.current = true;
+
+      if (recognitionRef.current) {
+        setIsBackgroundListening(true);
         return;
       }
 
-      let finalChunk = "";
-      let interimChunk = "";
+      const SpeechRecognition =
+        (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
-      for (let index = event.resultIndex; index < event.results.length; index += 1) {
-        const result = event.results[index];
-        const piece = result?.[0]?.transcript?.trim();
-
-        if (!piece) {
-          continue;
-        }
-
-        if (result.isFinal) {
-          finalChunk = joinTranscript([finalChunk, piece]);
-        } else {
-          interimChunk = joinTranscript([interimChunk, piece]);
-        }
-      }
-
-      const latestChunk = joinTranscript([finalChunk, interimChunk]);
-      if (!latestChunk) {
-        return;
-      }
-
-      if (!isActiveRef.current) {
-        const commandAfterWakeWord = extractCommandAfterWakeWord(
-          latestChunk,
-          wakeWords,
-        );
-
-        if (commandAfterWakeWord === null) {
-          return;
-        }
-
-        const normalizedLatestChunk = normalizeText(latestChunk);
-        const now = Date.now();
-
-        if (
-          normalizedLatestChunk &&
-          normalizedLatestChunk === lastWakeActivationRef.current.text &&
-          now - lastWakeActivationRef.current.at < DUPLICATE_WAKE_WORD_WINDOW_MS
-        ) {
-          return;
-        }
-
-        lastWakeActivationRef.current = {
-          text: normalizedLatestChunk,
-          at: now,
-        };
-
-        activateListening("wake", commandAfterWakeWord);
-        return;
-      }
-
-      if (finalChunk) {
-        const normalizedFinalChunk = normalizeText(finalChunk);
-
-        if (
-          normalizedFinalChunk &&
-          !transcriptSetRef.current.has(normalizedFinalChunk)
-        ) {
-          transcriptSetRef.current.add(normalizedFinalChunk);
-          transcriptPartsRef.current = [
-            ...transcriptPartsRef.current,
-            joinTranscript([finalChunk]),
-          ];
-        }
-      }
-
-      interimTranscriptRef.current = joinTranscript([interimChunk]);
-      updateTranscriptState();
-      scheduleSilenceTimeout();
-    },
-    [activateListening, scheduleSilenceTimeout, updateTranscriptState, wakeWords],
-  );
-
-  const createRecognition = useCallback(() => {
-    if (recognitionRef.current) {
-      return recognitionRef.current;
-    }
-
-    const SpeechRecognition =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-
-    if (!SpeechRecognition) {
-      setError("Reconocimiento de voz no soportado en este navegador");
-      shouldKeepRecognitionAliveRef.current = false;
-      return null;
-    }
-
-    const recognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = language;
-    recognition.maxAlternatives = 1;
-
-    recognition.onstart = () => {
-      recognitionStatusRef.current = "running";
-      setIsBackgroundListening(true);
-    };
-
-    recognition.onresult = handleRecognitionResult;
-
-    recognition.onerror = (event: any) => {
-      if (event.error === "no-speech") {
-        return;
-      }
-
-      if (event.error === "aborted") {
-        return;
-      }
-
-      if (event.error === "not-allowed") {
-        setError("Permiso de micrófono denegado");
+      if (!SpeechRecognition) {
+        setError("Reconocimiento de voz no soportado en este navegador");
         shouldKeepRecognitionAliveRef.current = false;
-        setIsBackgroundListening(false);
         return;
       }
 
-      if (event.error === "audio-capture") {
-        setError("No se pudo acceder al micrófono");
-        return;
-      }
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = language;
+      recognition.maxAlternatives = 1;
 
-      setError(`Error de reconocimiento de voz: ${event.error}`);
-    };
+      recognition.onstart = () => {
+        setIsBackgroundListening(true);
+      };
 
-    recognition.onend = () => {
-      const wasStopping = recognitionStatusRef.current === "stopping";
-      recognitionStatusRef.current = "idle";
+      recognition.onresult = (event: any) => {
+        if (Date.now() < ignoreResultsUntilRef.current) {
+          return;
+        }
 
-      if (wasStopping && !shouldKeepRecognitionAliveRef.current) {
-        setIsBackgroundListening(false);
-        return;
-      }
+        let finalChunk = "";
+        let interimChunk = "";
 
-      if (shouldKeepRecognitionAliveRef.current) {
-        clearRestartTimer();
-        restartTimerRef.current = setTimeout(() => {
-          if (!shouldKeepRecognitionAliveRef.current) {
-            return;
+        for (let index = event.resultIndex; index < event.results.length; index += 1) {
+          const result = event.results[index];
+          const piece = result?.[0]?.transcript?.trim();
+
+          if (!piece) {
+            continue;
           }
 
-          if (recognitionStatusRef.current !== "idle") {
-            return;
+          if (result.isFinal) {
+            finalChunk = joinTranscript([finalChunk, piece]);
+          } else {
+            interimChunk = joinTranscript([interimChunk, piece]);
           }
+        }
 
+        const latestChunk = joinTranscript([finalChunk, interimChunk]);
+
+        if (!isActiveRef.current) {
+          const commandAfterWakeWord = extractCommandAfterWakeWord(
+            latestChunk,
+            wakeWords,
+          );
+
+          if (commandAfterWakeWord !== null) {
+            activateListening("wake", commandAfterWakeWord);
+          }
+          return;
+        }
+
+        if (finalChunk) {
+          const normalizedFinalChunk = normalizeText(finalChunk);
+
+          if (
+            normalizedFinalChunk &&
+            normalizedFinalChunk !== lastFinalChunkRef.current
+          ) {
+            transcriptPartsRef.current = [
+              ...transcriptPartsRef.current,
+              joinTranscript([finalChunk]),
+            ];
+            lastFinalChunkRef.current = normalizedFinalChunk;
+          }
+        }
+
+        interimTranscriptRef.current = joinTranscript([interimChunk]);
+        updateTranscriptState();
+        scheduleSilenceTimeout();
+      };
+
+      recognition.onerror = (event: any) => {
+        if (event.error === "no-speech" || event.error === "aborted") {
+          return;
+        }
+
+        if (event.error === "not-allowed") {
+          setError("Permiso de micrófono denegado");
+          shouldKeepRecognitionAliveRef.current = false;
+          return;
+        }
+
+        if (event.error === "audio-capture") {
+          setError("No se pudo acceder al micrófono");
+          return;
+        }
+
+        setError(`Error de reconocimiento de voz: ${event.error}`);
+      };
+
+      recognition.onend = () => {
+        if (shouldKeepRecognitionAliveRef.current) {
           try {
-            recognitionStatusRef.current = "starting";
             recognition.start();
+            return;
           } catch (restartError) {
-            recognitionStatusRef.current = "idle";
             console.warn("No se pudo reiniciar el reconocimiento:", restartError);
           }
-        }, RESTART_DELAY_MS);
-        return;
-      }
+        }
 
-      setIsBackgroundListening(false);
-    };
+        recognitionRef.current = null;
+        setIsBackgroundListening(false);
+      };
 
-    recognitionRef.current = recognition;
-    return recognition;
-  }, [clearRestartTimer, handleRecognitionResult, language]);
-
-  const ensureRecognitionStarted = useCallback(() => {
-    const recognition = createRecognition();
-    if (!recognition) {
-      return;
-    }
-
-    if (
-      recognitionStatusRef.current === "running" ||
-      recognitionStatusRef.current === "starting"
-    ) {
-      return;
-    }
-
-    clearRestartTimer();
-
-    try {
-      recognitionStatusRef.current = "starting";
+      recognitionRef.current = recognition;
       recognition.start();
-    } catch (startError) {
-      recognitionStatusRef.current = "idle";
-      console.warn("No se pudo iniciar el reconocimiento:", startError);
+    } catch (err: any) {
+      shouldKeepRecognitionAliveRef.current = false;
+      setError(`Error al iniciar reconocimiento de voz: ${err.message}`);
     }
-  }, [clearRestartTimer, createRecognition]);
-
-  const startBackgroundListening = useCallback(() => {
-    setError(null);
-    shouldKeepRecognitionAliveRef.current = true;
-    ensureRecognitionStarted();
-  }, [ensureRecognitionStarted]);
+  }, [
+    activateListening,
+    language,
+    scheduleSilenceTimeout,
+    updateTranscriptState,
+    wakeWords,
+  ]);
 
   const stopBackgroundListening = useCallback(() => {
     shouldKeepRecognitionAliveRef.current = false;
-    clearRestartTimer();
     void completeActiveListening(false);
 
     if (recognitionRef.current) {
-      recognitionStatusRef.current = "stopping";
       try {
         recognitionRef.current.stop();
       } catch (stopError) {
-        recognitionStatusRef.current = "idle";
         console.warn("No se pudo detener el reconocimiento:", stopError);
       }
-    } else {
-      setIsBackgroundListening(false);
+      recognitionRef.current = null;
     }
-  }, [clearRestartTimer, completeActiveListening]);
+
+    setIsBackgroundListening(false);
+  }, [completeActiveListening]);
 
   const startManualListening = useCallback(() => {
     setError(null);
-    shouldKeepRecognitionAliveRef.current = true;
-    ensureRecognitionStarted();
+    startBackgroundListening();
     activateListening("manual");
-  }, [activateListening, ensureRecognitionStarted]);
-
-  const submitActiveListening = useCallback(
-    async (submitOptions?: SubmitOptions) => {
-      await completeActiveListening(true, submitOptions?.allowEmpty ?? false);
-    },
-    [completeActiveListening],
-  );
-
-  const cancelActiveListening = useCallback(() => {
-    void completeActiveListening(false);
-  }, [completeActiveListening]);
+  }, [activateListening, startBackgroundListening]);
 
   const resetActive = useCallback(() => {
     cancelActiveListening();
@@ -422,10 +331,8 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     return () => {
       shouldKeepRecognitionAliveRef.current = false;
       clearSilenceTimer();
-      clearRestartTimer();
 
       if (recognitionRef.current) {
-        recognitionStatusRef.current = "stopping";
         try {
           recognitionRef.current.stop();
         } catch (stopError) {
@@ -433,7 +340,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
         }
       }
     };
-  }, [clearRestartTimer, clearSilenceTimer]);
+  }, [clearSilenceTimer]);
 
   return {
     isBackgroundListening,

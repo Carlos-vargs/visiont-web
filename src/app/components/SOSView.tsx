@@ -169,11 +169,7 @@ export function SOSView() {
     },
   });
 
-  const contacts = mergeContacts(
-    initialContacts,
-    savedContacts,
-    deviceContacts,
-  );
+  const contacts = mergeContacts(initialContacts, savedContacts, deviceContacts);
 
   useEffect(() => {
     contactsRef.current = contacts;
@@ -196,10 +192,7 @@ export function SOSView() {
       return;
     }
 
-    const timer = setTimeout(
-      () => setCountdown((current) => current - 1),
-      1000,
-    );
+    const timer = setTimeout(() => setCountdown((current) => current - 1), 1000);
     return () => clearTimeout(timer);
   }, [countdown, sosActive]);
 
@@ -310,11 +303,7 @@ export function SOSView() {
   }, [startBackgroundListening, stopBackgroundListening]);
 
   useEffect(() => {
-    if (
-      permissionStatus === "granted" &&
-      canListDeviceContacts &&
-      deviceContacts.length === 0
-    ) {
+    if (permissionStatus === "granted" && canListDeviceContacts && deviceContacts.length === 0) {
       void refreshDeviceContacts();
     }
   }, [
@@ -335,17 +324,6 @@ export function SOSView() {
       setVoiceStatus(voiceError);
     }
   }, [voiceError]);
-
-  const requestMicrophonePermission = useCallback(async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      stream.getTracks().forEach((track) => track.stop());
-      return true;
-    } catch {
-      setVoiceStatus("Permite el micrófono para usar comandos de voz");
-      return false;
-    }
-  }, []);
 
   const cancelSOS = useCallback(() => {
     setSosActive(false);
@@ -549,17 +527,12 @@ export function SOSView() {
     ],
   );
 
-  const handleMicPress = useCallback(async () => {
+  const handleMicPress = useCallback(() => {
     clearContactPickerError();
 
     if (voiceActive) {
       setVoiceStatus("Procesando comando...");
-      await submitActiveListening();
-      return;
-    }
-
-    const granted = await requestMicrophonePermission();
-    if (!granted) {
+      void submitActiveListening();
       return;
     }
 
@@ -568,7 +541,6 @@ export function SOSView() {
     startManualListening();
   }, [
     clearContactPickerError,
-    requestMicrophonePermission,
     startManualListening,
     submitActiveListening,
     voiceActive,
@@ -652,9 +624,7 @@ export function SOSView() {
               >
                 <p
                   style={{ fontSize: "12px" }}
-                  className={
-                    contactPickerError ? "text-red-600" : "text-blue-700"
-                  }
+                  className={contactPickerError ? "text-red-600" : "text-blue-700"}
                 >
                   {contactPickerError || voiceStatus}
                 </p>
@@ -735,8 +705,7 @@ export function SOSView() {
                   style={{ fontSize: "15px" }}
                   className="text-center font-medium text-red-600"
                 >
-                  Enviando alerta en{" "}
-                  <span className="tabular-nums">{countdown}s</span>...
+                  Enviando alerta en <span className="tabular-nums">{countdown}s</span>...
                 </p>
                 <button
                   onClick={cancelSOS}
@@ -754,10 +723,7 @@ export function SOSView() {
                 animate={{ opacity: 1, y: 0 }}
                 className="flex flex-col items-center gap-1"
               >
-                <p
-                  style={{ fontSize: "15px" }}
-                  className="font-medium text-red-600"
-                >
+                <p style={{ fontSize: "15px" }} className="font-medium text-red-600">
                   ¡Alerta enviada!
                 </p>
                 <p style={{ fontSize: "12px" }} className="text-gray-500">
@@ -799,9 +765,7 @@ export function SOSView() {
               </p>
               <p
                 style={{ fontSize: "11px" }}
-                className={
-                  locationShared ? "text-emerald-600" : "text-gray-500"
-                }
+                className={locationShared ? "text-emerald-600" : "text-gray-500"}
               >
                 {locationShared ? "Compartida" : "Lista para enviar"}
               </p>
@@ -844,15 +808,11 @@ export function SOSView() {
                 <BookUser size={18} className="text-blue-600" />
               </div>
               <div className="min-w-0 flex-1">
-                <p
-                  style={{ fontSize: "13px" }}
-                  className="font-medium text-slate-800"
-                >
+                <p style={{ fontSize: "13px" }} className="font-medium text-slate-800">
                   Permitir acceso a tus contactos
                 </p>
                 <p style={{ fontSize: "11px" }} className="text-gray-500">
-                  Esto permite buscar contactos por voz y marcar
-                  automáticamente.
+                  Esto permite buscar contactos por voz y marcar automáticamente.
                 </p>
               </div>
               <button
@@ -937,9 +897,7 @@ export function SOSView() {
                 style={{ fontSize: "11px" }}
               >
                 <UserPlus size={12} />
-                {canListDeviceContacts || isContactPickerSupported
-                  ? "Agregar"
-                  : "Manual"}
+                {canListDeviceContacts || isContactPickerSupported ? "Agregar" : "Manual"}
               </button>
             </div>
           </div>
