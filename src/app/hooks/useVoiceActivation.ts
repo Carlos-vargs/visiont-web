@@ -30,10 +30,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
   const recognitionRef = useRef<any>(null);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSpeechTimeRef = useRef<number>(0);
-  
-  // Refs para manejar el estado sin dependencias cíclicas
   const transcriptBufferRef = useRef<string>("");
-  const processedResultsRef = useRef<Set<number>>(new Set()); // Track processed result indices
   const isActiveRef = useRef(false);
   const isProcessingRef = useRef(false);
   const isBackgroundListeningRef = useRef(false);
@@ -50,32 +47,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     return wakeWords.some(word => lowerText.includes(word.toLowerCase()));
   }, [wakeWords]);
 
-  // Limpiar y normalizar texto - eliminar duplicados consecutivos
-  const cleanTranscript = useCallback((text: string): string => {
-    if (!text) return "";
-    
-    // Eliminar espacios múltiples
-    let cleaned = text.replace(/\s+/g, " ").trim();
-    
-    // Eliminar palabras duplicadas consecutivas
-    const words = cleaned.split(" ");
-    const uniqueWords: string[] = [];
-    
-    for (let i = 0; i < words.length; i++) {
-      const word = words[i].toLowerCase();
-      const prevWord = uniqueWords.length > 0 
-        ? uniqueWords[uniqueWords.length - 1].toLowerCase() 
-        : "";
-      
-      // Solo agregar si no es igual a la palabra anterior
-      if (word !== prevWord || i === 0) {
-        uniqueWords.push(words[i]);
-      }
-    }
-    
-    return uniqueWords.join(" ").trim();
-  }, []);
-
+  // Handle silence timeout - auto-stop and send
   const handleSilenceTimeout = useCallback(() => {
     if (isActiveRef.current && !isProcessingRef.current) {
       console.log("Silence detected, auto-stopping...");
@@ -91,20 +63,16 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
         }
       }
 
-      // Limpiar y entregar transcripción final
-      const finalTranscript = cleanTranscript(transcriptBufferRef.current);
-      
-      if (optionsRef.current.onSilence && finalTranscript) {
-        console.log("Final clean transcript:", finalTranscript);
-        optionsRef.current.onSilence(finalTranscript);
+      // Call the onSilence callback to trigger analysis with transcript
+      if (optionsRef.current.onSilence && transcriptBufferRef.current) {
+        optionsRef.current.onSilence(transcriptBufferRef.current.trim());
       }
 
       isProcessingRef.current = false;
       setIsProcessing(false);
     }
-  }, [cleanTranscript]);
+  }, []);
 
-  
   // Start background listening (always on)
   const startBackgroundListening = useCallback(() => {
     try {
@@ -126,26 +94,16 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
       recognition.onstart = () => {
         setIsBackgroundListening(true);
         isBackgroundListeningRef.current = true;
-        processedResultsRef.current.clear(); // Reset processed results on start
       };
 
       recognition.onresult = (event: any) => {
         let interimTranscript = "";
         let finalTranscript = "";
 
-        // Procesar solo resultados nuevos (no procesados)
         for (let i = event.resultIndex; i < event.results.length; i++) {
-          // Skip if already processed
-          if (processedResultsRef.current.has(i)) {
-            continue;
-          }
-          
           const transcript = event.results[i][0].transcript;
-          const isFinal = event.results[i].isFinal;
-          
-          if (isFinal) {
-            finalTranscript += transcript + " ";
-            processedResultsRef.current.add(i); // Mark as processed
+          if (event.results[i].isFinal) {
+            finalTranscript += transcript;
           } else {
             interimTranscript += transcript;
           }
@@ -159,44 +117,33 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
           clearTimeout(silenceTimerRef.current);
         }
 
-        // Check for wake words
-        const currentTranscript = finalTranscript || interimTranscript;
-        
-        if (currentTranscript && containsWakeWord(currentTranscript) && !isActiveRef.current) {
-          console.log("Wake word detected:", currentTranscript);
+        // Check for wake words in interim or final transcript
+        const fullTranscript = finalTranscript || interimTranscript;
+        if (fullTranscript && containsWakeWord(fullTranscript) && !isActiveRef.current) {
+          console.log("Wake word detected:", fullTranscript);
 
           // Activate listening mode
           isActiveRef.current = true;
           setIsActive(true);
-          
-          // Start fresh with cleaned transcript (exclude wake word context)
-          const cleanedWakeTranscript = cleanTranscript(currentTranscript);
-          transcriptBufferRef.current = cleanedWakeTranscript + " ";
-          setTranscript(cleanedWakeTranscript);
+          // Start fresh transcript buffer (exclude wake word if possible)
+          transcriptBufferRef.current = fullTranscript + " ";
+          setTranscript(fullTranscript);
 
+          // Call activation callback
           if (optionsRef.current.onActivation) {
             optionsRef.current.onActivation();
           }
 
+          // Start silence timer for auto-stop
           silenceTimerRef.current = setTimeout(handleSilenceTimeout, silenceTimeout);
         }
 
-        // If already active, append ONLY final results to avoid duplicates
-        if (isActiveRef.current && finalTranscript) {
-          const cleanedFinal = cleanTranscript(finalTranscript);
-          
-          // Check if this is a duplicate of the last content
-          const lastContent = transcriptBufferRef.current.trim().split(" ").slice(-3).join(" ");
-          const newContent = cleanedFinal.split(" ").slice(0, 3).join(" ");
-          
-          // Only add if it's not a duplicate
-          if (!lastContent.includes(newContent) || lastContent.length === 0) {
-            transcriptBufferRef.current += cleanedFinal + " ";
-            const fullCleanTranscript = cleanTranscript(transcriptBufferRef.current);
-            setTranscript(fullCleanTranscript);
-          }
+        // If already active, buffer the transcript and keep checking for silence
+        if (isActiveRef.current && fullTranscript) {
+          transcriptBufferRef.current += fullTranscript + " ";
+          setTranscript(transcriptBufferRef.current.trim());
 
-          // Reset silence timer
+          // Reset silence timer on each speech input
           if (silenceTimerRef.current) {
             clearTimeout(silenceTimerRef.current);
           }
@@ -206,6 +153,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
 
       recognition.onerror = (event: any) => {
         if (event.error === "no-speech") {
+          // Ignore no-speech errors (normal during silence)
           return;
         }
         if (event.error === "not-allowed") {
@@ -216,6 +164,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
       };
 
       recognition.onend = () => {
+        // Auto-restart if we're supposed to be listening
         if (isBackgroundListeningRef.current && !isActiveRef.current) {
           try {
             recognition.start();
@@ -230,8 +179,9 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     } catch (err: any) {
       setError(`Error al iniciar reconocimiento de voz: ${err.message}`);
     }
-  }, [language, containsWakeWord, handleSilenceTimeout, silenceTimeout, cleanTranscript]);
+  }, [language, containsWakeWord, handleSilenceTimeout, silenceTimeout]);
 
+  // Stop background listening
   const stopBackgroundListening = useCallback(() => {
     if (recognitionRef.current) {
       try {
@@ -253,18 +203,19 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     isBackgroundListeningRef.current = false;
   }, []);
 
+  // Reset active state (called after analysis is complete)
   const resetActive = useCallback(() => {
     isActiveRef.current = false;
     setIsActive(false);
     transcriptBufferRef.current = "";
     setTranscript("");
-    processedResultsRef.current.clear();
 
     if (silenceTimerRef.current) {
       clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = null;
     }
 
+    // Restart background listening
     if (isBackgroundListeningRef.current) {
       stopBackgroundListening();
       setTimeout(() => {
@@ -273,6 +224,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     }
   }, [startBackgroundListening, stopBackgroundListening]);
 
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
       stopBackgroundListening();
