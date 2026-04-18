@@ -28,14 +28,9 @@ export function useGemini() {
   const [messages, setMessages] = useState<GeminiMessage[]>([]);
   
   const aiRef = useRef<GoogleGenAI | null>(null);
-  const messagesRef = useRef<GeminiMessage[]>([]);
   const liveSessionRef = useRef<any>(null);
   const audioInputQueueRef = useRef<any[]>([]);
   const abortControllerRef = useRef<AbortController | null>(null);
-
-  useEffect(() => {
-    messagesRef.current = messages;
-  }, [messages]);
 
   useEffect(() => {
     const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
@@ -104,7 +99,8 @@ Mantén las respuestas informativas pero breves (2-3 oraciones máximo para feed
         const userMsg: GeminiMessage = { role: "user", text };
         setMessages((prev) => [...prev, userMsg]);
 
-        const chatHistory = messagesRef.current.map((msg) => ({
+        // Preparar el historial de mensajes para contexto
+        const chatHistory = messages.map((msg) => ({
           role: msg.role,
           parts: [{ text: msg.text }],
         }));
@@ -135,7 +131,7 @@ Mantén las respuestas informativas pero breves (2-3 oraciones máximo para feed
         setIsLoading(false);
       }
     },
-    []
+    [messages]
   );
 
   const sendImageWithPrompt = useCallback(
@@ -295,7 +291,6 @@ Proporciona coordenadas aproximadas (x, y como porcentaje de la imagen desde la 
   }, []);
 
   const clearHistory = useCallback(() => {
-    messagesRef.current = [];
     setMessages([]);
   }, []);
 
