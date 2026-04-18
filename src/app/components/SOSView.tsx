@@ -30,21 +30,6 @@ const initialContacts: Contact[] = [
   },
 ];
 
-const SOS_WAKE_WORDS = [
-  "ayuda",
-  "emergencia",
-  "sos",
-  "llama a",
-  "llamar a",
-  "marca a",
-  "buscar contacto",
-  "busca a",
-  "agregar contacto",
-  "agrega a",
-  "sincroniza contactos",
-  "contacto",
-];
-
 const getInitials = (name: string): string =>
   name
     .split(" ")
@@ -286,6 +271,33 @@ export function SOSView() {
     setIsListening(false);
   }, [stopAudioListening]);
 
+  const finishVoiceCommand = useCallback(
+    async (transcript: string) => {
+      const command = transcript.trim();
+      if (!command || isProcessingCommandRef.current) {
+        return;
+      }
+
+      isProcessingCommandRef.current = true;
+      setVoiceStatus("Procesando comando...");
+      stopVoiceListening();
+
+      try {
+        await handleVoiceCommand(command);
+      } finally {
+        isProcessingCommandRef.current = false;
+        resetActive();
+      }
+    },
+    [resetActive, stopVoiceListening],
+  );
+
+  useEffect(() => {
+    finishVoiceCommandRef.current = (transcript: string) => {
+      void finishVoiceCommand(transcript);
+    };
+  }, [finishVoiceCommand]);
+
   const handleEmptyVoiceCommand = useCallback(() => {
     const message =
       "No escuché un comando. Puedes decir llama a mamá o activa emergencia.";
@@ -293,27 +305,67 @@ export function SOSView() {
     void speakFeedback(message);
   }, [speakFeedback]);
 
+  const handleVoiceStatus = useCallback((message: string) => {
+    setVoiceStatus(message);
+  }, []);
+
+  const speakFeedbackLegacy = useCallback((text: string) => {
+    try {
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = "es-ES";
+      utterance.rate = 0.95;
+
+      utterance.onstart = () => {
+        isSpeakingRef.current = true;
+      };
+      utterance.onend = () => {
+        isSpeakingRef.current = false;
+      };
+      utterance.onerror = () => {
+        isSpeakingRef.current = false;
+      };
+
+      window.speechSynthesis.speak(utterance);
+    } catch (error) {
+      console.warn("Speech synthesis error:", error);
+      isSpeakingRef.current = false;
+    }
+  }, []);
+
   const {
     isBackgroundListening,
     isActive: voiceActive,
+    isManualListening,
     isProcessing: voiceProcessing,
     transcript: userTranscript,
     error: voiceError,
     startBackgroundListening,
     stopBackgroundListening,
-    resetActive,
+    startManualListening,
+    submitActiveListening,
   } = useVoiceActivation({
-    wakeWords: SOS_WAKE_WORDS,
+    wakeWords: [
+      "ayuda",
+      "emergencia",
+      "sos",
+      "llama a",
+      "llamar a",
+      "marca a",
+      "buscar contacto",
+      "busca a",
+      "agregar contacto",
+      "agrega a",
+      "sincroniza contactos",
+      "contacto",
+    ],
     silenceTimeout: 2600,
     onActivation: () => {
       setVoiceStatus("Escuchando comando...");
       clearContactPickerError();
-      if (!isListeningRef.current && !isProcessingCommandRef.current) {
-        void startVoiceListeningRef.current?.();
-      }
     },
     onSilence: async (transcript: string) => {
-      finishVoiceCommandRef.current?.(transcript);
+      setVoiceStatus("Procesando comando...");
+      await handleVoiceCommand(transcript);
     },
   });
 
@@ -587,65 +639,22 @@ export function SOSView() {
     ],
   );
 
-  const finishVoiceCommand = useCallback(
-    async (transcript: string) => {
-      const command = transcript.trim();
-      if (isProcessingCommandRef.current) {
-        return;
-      }
-
-      if (!command) {
-        stopVoiceListening();
-        handleEmptyVoiceCommand();
-        resetActive();
-        return;
-      }
-
-      isProcessingCommandRef.current = true;
-      setVoiceStatus("Procesando comando...");
-      stopVoiceListening();
-
-      try {
-        await handleVoiceCommand(command);
-      } finally {
-        isProcessingCommandRef.current = false;
-        resetActive();
-      }
-    },
-    [
-      handleEmptyVoiceCommand,
-      handleVoiceCommand,
-      resetActive,
-      stopVoiceListening,
-    ],
-  );
-
-  useEffect(() => {
-    finishVoiceCommandRef.current = (transcript: string) => {
-      void finishVoiceCommand(transcript);
-    };
-  }, [finishVoiceCommand]);
-
-  const handleMicPress = useCallback(async () => {
+  const handleMicPress = useCallback(() => {
     clearContactPickerError();
 
-    if (voiceActive || isListening) {
-      await finishVoiceCommand(userTranscript);
+    if (voiceActive) {
+      setVoiceStatus("Procesando comando...");
+      void submitActiveListening();
       return;
     }
 
-    await startVoiceListening();
-    if (!isBackgroundListening) {
-      startBackgroundListening();
-    }
+    setShowManualInput(false);
+    setVoiceStatus("Habla ahora...");
+    startManualListening();
   }, [
     clearContactPickerError,
-    finishVoiceCommand,
-    isBackgroundListening,
-    isListening,
-    startBackgroundListening,
-    startVoiceListening,
-    userTranscript,
+    startManualListening,
+    submitActiveListening,
     voiceActive,
   ]);
 
@@ -702,8 +711,6 @@ export function SOSView() {
     setShowManualInput(false);
   }, [callContact, manualPhone]);
 
-  const isVoiceCaptureActive = voiceActive || isListening;
-
   return (
     <>
       <AppHeader />
@@ -713,7 +720,7 @@ export function SOSView() {
         style={{ background: "#F8FAFC" }}
       >
         <AnimatePresence>
-          {(voiceStatus || contactPickerError || audioError) && (
+          {(voiceStatus || contactPickerError) && (
             <motion.div
               initial={{ opacity: 0, y: -10 }}
               animate={{ opacity: 1, y: 0 }}
@@ -722,7 +729,7 @@ export function SOSView() {
             >
               <div
                 className={`rounded-xl px-4 py-2.5 text-center ${
-                  contactPickerError || audioError
+                  contactPickerError
                     ? "border border-red-200 bg-red-50"
                     : "border border-blue-200 bg-blue-50"
                 }`}
@@ -730,12 +737,10 @@ export function SOSView() {
                 <p
                   style={{ fontSize: "12px" }}
                   className={
-                    contactPickerError || audioError
-                      ? "text-red-600"
-                      : "text-blue-700"
+                    contactPickerError ? "text-red-600" : "text-blue-700"
                   }
                 >
-                  {contactPickerError || audioError || voiceStatus}
+                  {contactPickerError || voiceStatus}
                 </p>
               </div>
             </motion.div>
@@ -1084,49 +1089,37 @@ export function SOSView() {
           >
             {voiceProcessing
               ? "Procesando..."
-              : isVoiceCaptureActive
+              : voiceActive
                 ? "Escuchando... toca de nuevo para enviar"
                 : isBackgroundListening
                   ? "Di 'llama a mamá' o toca para hablar"
                   : "Toca para habilitar comandos de voz"}
           </p>
 
-          {isListening && (
-            <div className="pointer-events-auto mb-3 flex items-center gap-2 rounded-full bg-white/90 px-3 py-1.5 shadow-sm">
-              <Mic size={12} className="text-blue-500" />
-              <div className="h-1.5 w-16 overflow-hidden rounded-full bg-slate-200">
-                <div
-                  className="h-full bg-blue-500 transition-all duration-100"
-                  style={{ width: `${audioLevel * 100}%` }}
-                />
-              </div>
-            </div>
-          )}
-
           <motion.button
             whileTap={{ scale: 0.93 }}
             onClick={handleMicPress}
             aria-label={
-              isVoiceCaptureActive
+              voiceActive || isManualListening
                 ? "Enviar comando de voz"
                 : "Activar comando de voz"
             }
-            aria-pressed={isVoiceCaptureActive}
+            aria-pressed={voiceActive || isManualListening}
             className="pointer-events-auto relative flex items-center justify-center rounded-full transition-all duration-200 focus:outline-none focus-visible:ring-4 focus-visible:ring-blue-400"
             style={{
               width: 72,
               height: 72,
               background:
-                isVoiceCaptureActive
+                voiceActive || isManualListening
                   ? "linear-gradient(145deg, #3B82F6, #2563EB)"
                   : "#F1F5F9",
               boxShadow:
-                isVoiceCaptureActive
+                voiceActive || isManualListening
                   ? "0 8px 24px rgba(59,130,246,0.45), inset 0 1px 0 rgba(255,255,255,0.2)"
                   : "8px 8px 16px #d1d9e0, -8px -8px 16px #ffffff",
             }}
           >
-            {isVoiceCaptureActive && (
+            {(voiceActive || isManualListening) && (
               <>
                 <motion.div
                   className="absolute inset-0 rounded-full bg-white/30"
@@ -1150,11 +1143,11 @@ export function SOSView() {
               </>
             )}
 
-            {isBackgroundListening && !isVoiceCaptureActive && (
+            {isBackgroundListening && !voiceActive && !isManualListening && (
               <div className="absolute -right-1 -top-1 h-3 w-3 rounded-full border-2 border-white bg-green-400 animate-pulse" />
             )}
 
-            {isVoiceCaptureActive ? (
+            {voiceActive || isManualListening ? (
               <MicOff size={28} className="relative z-10 text-white" />
             ) : (
               <Mic
