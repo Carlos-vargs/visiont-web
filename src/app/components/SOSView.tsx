@@ -15,6 +15,7 @@ import {
   RefreshCcw,
   BookUser,
 } from "lucide-react";
+import { useAudio } from "../hooks/useAudio";
 import { useVoiceActivation } from "../hooks/useVoiceActivation";
 import { useContactPicker, type Contact } from "../hooks/useContactPicker";
 
@@ -139,11 +140,18 @@ export function SOSView() {
   const [manualPhone, setManualPhone] = useState("");
   const [voiceStatus, setVoiceStatus] = useState("");
   const [showManualInput, setShowManualInput] = useState(false);
+  const [isListening, setIsListening] = useState(false);
 
   const isSpeakingRef = useRef(false);
+  const isListeningRef = useRef(false);
+  const isProcessingCommandRef = useRef(false);
   const contactsRef = useRef<Contact[]>(initialContacts);
   const sosActiveRef = useRef(sosActive);
   const pendingCallNameRef = useRef<string | null>(null);
+  const finishVoiceCommandRef = useRef<((transcript: string) => void) | null>(
+    null,
+  );
+  const startVoiceListeningRef = useRef<(() => Promise<void>) | null>(null);
 
   const {
     isSupported: isContactPickerSupported,
@@ -169,6 +177,18 @@ export function SOSView() {
     },
   });
 
+  const {
+    error: audioError,
+    audioLevel,
+    startListening: startAudioListening,
+    stopListening: stopAudioListening,
+    speakText,
+    requestMicrophonePermission,
+  } = useAudio({
+    sendSampleRate: 16000,
+    enableEchoCancellation: true,
+  });
+
   const contacts = mergeContacts(
     initialContacts,
     savedContacts,
@@ -184,6 +204,49 @@ export function SOSView() {
   }, [sosActive]);
 
   useEffect(() => {
+    isListeningRef.current = isListening;
+  }, [isListening]);
+
+  const speakFeedback = useCallback(
+    async (text: string) => {
+      window.speechSynthesis.cancel();
+      isSpeakingRef.current = true;
+
+      try {
+        await speakText(text);
+      } finally {
+        isSpeakingRef.current = false;
+      }
+    },
+    [speakText],
+  );
+
+  const startVoiceListening = useCallback(async () => {
+    clearContactPickerError();
+    setShowManualInput(false);
+
+    const granted = await requestMicrophonePermission();
+    if (!granted) {
+      setVoiceStatus("Permiso de micrófono denegado");
+      return;
+    }
+
+    await startAudioListening();
+    setIsListening(true);
+    setVoiceStatus("Escuchando comando...");
+    void speakFeedback("Escuchando");
+  }, [
+    clearContactPickerError,
+    requestMicrophonePermission,
+    speakFeedback,
+    startAudioListening,
+  ]);
+
+  useEffect(() => {
+    startVoiceListeningRef.current = startVoiceListening;
+  }, [startVoiceListening]);
+
+  useEffect(() => {
     if (!sosActive) {
       setCountdown(5);
       return;
@@ -192,7 +255,7 @@ export function SOSView() {
     if (countdown <= 0) {
       setLocationShared(true);
       setMessageSent(true);
-      speakFeedback("Alerta de emergencia enviada. Ayuda en camino.");
+      void speakFeedback("Alerta de emergencia enviada. Ayuda en camino.");
       return;
     }
 
@@ -201,14 +264,52 @@ export function SOSView() {
       1000,
     );
     return () => clearTimeout(timer);
-  }, [countdown, sosActive]);
+  }, [countdown, sosActive, speakFeedback]);
 
-  const speakFeedback = useCallback((text: string) => {
-    if (isSpeakingRef.current) {
-      window.speechSynthesis.cancel();
-      isSpeakingRef.current = false;
-    }
+  const stopVoiceListening = useCallback(() => {
+    stopAudioListening();
+    setIsListening(false);
+  }, [stopAudioListening]);
 
+  const finishVoiceCommand = useCallback(
+    async (transcript: string) => {
+      const command = transcript.trim();
+      if (!command || isProcessingCommandRef.current) {
+        return;
+      }
+
+      isProcessingCommandRef.current = true;
+      setVoiceStatus("Procesando comando...");
+      stopVoiceListening();
+
+      try {
+        await handleVoiceCommand(command);
+      } finally {
+        isProcessingCommandRef.current = false;
+        resetActive();
+      }
+    },
+    [resetActive, stopVoiceListening],
+  );
+
+  useEffect(() => {
+    finishVoiceCommandRef.current = (transcript: string) => {
+      void finishVoiceCommand(transcript);
+    };
+  }, [finishVoiceCommand]);
+
+  const handleEmptyVoiceCommand = useCallback(() => {
+    const message =
+      "No escuché un comando. Puedes decir llama a mamá o activa emergencia.";
+    setVoiceStatus(message);
+    void speakFeedback(message);
+  }, [speakFeedback]);
+
+  const handleVoiceStatus = useCallback((message: string) => {
+    setVoiceStatus(message);
+  }, []);
+
+  const speakFeedbackLegacy = useCallback((text: string) => {
     try {
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.lang = "es-ES";
