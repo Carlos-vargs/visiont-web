@@ -8,16 +8,10 @@ type VoiceActivationOptions = {
   onSilence?: (transcript: string) => void;
 };
 
-/**
- * Hook for intelligent voice activation
- * Always listens in background for wake words
- * Auto-activates when wake words are detected
- * Auto-stops after silence timeout
- */
 export function useVoiceActivation(options: VoiceActivationOptions = {}) {
   const {
     wakeWords = ["analiza", "quiero que", "ok visiont", "visont", "analizando"],
-    silenceTimeout = 2000,
+    silenceTimeout = 4000,
     language = "es-ES",
   } = options;
 
@@ -29,202 +23,233 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
 
   const recognitionRef = useRef<any>(null);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastSpeechTimeRef = useRef<number>(0);
   const transcriptBufferRef = useRef<string>("");
-  const isActiveRef = useRef(false);
-  const isProcessingRef = useRef(false);
-  const isBackgroundListeningRef = useRef(false);
-  const optionsRef = useRef(options);
 
-  // Keep options ref updated
+  // State flags tracked in refs to avoid stale closures in recognition callbacks
+  const isActiveRef = useRef(false);
+  const isBackgroundListeningRef = useRef(false);
+  // Paused when TTS is speaking — prevents the mic from picking up synthesized voice
+  const isPausedRef = useRef(false);
+
+  const optionsRef = useRef(options);
   useEffect(() => {
     optionsRef.current = options;
   }, [options]);
 
-  // Check if transcript contains wake words
-  const containsWakeWord = useCallback((text: string): boolean => {
-    const lowerText = text.toLowerCase().trim();
-    return wakeWords.some(word => lowerText.includes(word.toLowerCase()));
-  }, [wakeWords]);
+  const containsWakeWord = useCallback(
+    (text: string): boolean => {
+      const lower = text.toLowerCase().trim();
+      return wakeWords.some((w) => lower.includes(w.toLowerCase()));
+    },
+    [wakeWords]
+  );
 
-  // Handle silence timeout - auto-stop and send
-  const handleSilenceTimeout = useCallback(() => {
-    if (isActiveRef.current && !isProcessingRef.current) {
-      console.log("Silence detected, auto-stopping...");
-      setIsProcessing(true);
-      setIsActive(false);
-
-      // Stop recognition
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.stop();
-        } catch (err) {
-          // ignore
-        }
-      }
-
-      // Call the onSilence callback to trigger analysis with transcript
-      if (optionsRef.current.onSilence && transcriptBufferRef.current) {
-        optionsRef.current.onSilence(transcriptBufferRef.current.trim());
-      }
-
-      isProcessingRef.current = false;
-      setIsProcessing(false);
-    }
-  }, []);
-
-  // Start background listening (always on)
-  const startBackgroundListening = useCallback(() => {
-    try {
-      setError(null);
-
-      // Check for SpeechRecognition API
-      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-      if (!SpeechRecognition) {
-        setError("Reconocimiento de voz no soportado en este navegador");
-        return;
-      }
-
-      const recognition = new SpeechRecognition();
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.lang = language;
-      recognition.maxAlternatives = 1;
-
-      recognition.onstart = () => {
-        setIsBackgroundListening(true);
-        isBackgroundListeningRef.current = true;
-      };
-
-      recognition.onresult = (event: any) => {
-        let interimTranscript = "";
-        let finalTranscript = "";
-
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const transcript = event.results[i][0].transcript;
-          if (event.results[i].isFinal) {
-            finalTranscript += transcript;
-          } else {
-            interimTranscript += transcript;
-          }
-        }
-
-        // Update last speech time
-        lastSpeechTimeRef.current = Date.now();
-
-        // Clear existing silence timer
-        if (silenceTimerRef.current) {
-          clearTimeout(silenceTimerRef.current);
-        }
-
-        // Check for wake words in interim or final transcript
-        const fullTranscript = finalTranscript || interimTranscript;
-        if (fullTranscript && containsWakeWord(fullTranscript) && !isActiveRef.current) {
-          console.log("Wake word detected:", fullTranscript);
-
-          // Activate listening mode
-          isActiveRef.current = true;
-          setIsActive(true);
-          // Start fresh transcript buffer (exclude wake word if possible)
-          transcriptBufferRef.current = fullTranscript + " ";
-          setTranscript(fullTranscript);
-
-          // Call activation callback
-          if (optionsRef.current.onActivation) {
-            optionsRef.current.onActivation();
-          }
-
-          // Start silence timer for auto-stop
-          silenceTimerRef.current = setTimeout(handleSilenceTimeout, silenceTimeout);
-        }
-
-        // If already active, buffer the transcript and keep checking for silence
-        if (isActiveRef.current && fullTranscript) {
-          transcriptBufferRef.current += fullTranscript + " ";
-          setTranscript(transcriptBufferRef.current.trim());
-
-          // Reset silence timer on each speech input
-          if (silenceTimerRef.current) {
-            clearTimeout(silenceTimerRef.current);
-          }
-          silenceTimerRef.current = setTimeout(handleSilenceTimeout, silenceTimeout);
-        }
-      };
-
-      recognition.onerror = (event: any) => {
-        if (event.error === "no-speech") {
-          // Ignore no-speech errors (normal during silence)
-          return;
-        }
-        if (event.error === "not-allowed") {
-          setError("Permiso de micrófono denegado");
-        } else {
-          console.warn("Speech recognition error:", event.error);
-        }
-      };
-
-      recognition.onend = () => {
-        // Auto-restart if we're supposed to be listening
-        if (isBackgroundListeningRef.current && !isActiveRef.current) {
-          try {
-            recognition.start();
-          } catch (err) {
-            // ignore restart errors
-          }
-        }
-      };
-
-      recognitionRef.current = recognition;
-      recognition.start();
-    } catch (err: any) {
-      setError(`Error al iniciar reconocimiento de voz: ${err.message}`);
-    }
-  }, [language, containsWakeWord, handleSilenceTimeout, silenceTimeout]);
-
-  // Stop background listening
-  const stopBackgroundListening = useCallback(() => {
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch (err) {
-        // ignore
-      }
-      recognitionRef.current = null;
-    }
-
+  const clearSilenceTimer = useCallback(() => {
     if (silenceTimerRef.current) {
       clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = null;
+    }
+  }, []);
+
+  const handleSilenceTimeout = useCallback(() => {
+    if (!isActiveRef.current) return;
+
+    const captured = transcriptBufferRef.current.trim();
+    // Do not fire if nothing was actually said after wake word
+    if (!captured) {
+      isActiveRef.current = false;
+      setIsActive(false);
+      return;
+    }
+
+    isActiveRef.current = false;
+    setIsActive(false);
+    setIsProcessing(true);
+
+    optionsRef.current.onSilence?.(captured);
+
+    setIsProcessing(false);
+  }, []);
+
+  // Builds a fresh recognition instance with all event handlers wired up.
+  // Called both on initial start and after resuming from pause.
+  const buildRecognition = useCallback(() => {
+    const SR =
+      (window as any).SpeechRecognition ||
+      (window as any).webkitSpeechRecognition;
+    if (!SR) return null;
+
+    const rec = new SR();
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.lang = language;
+    rec.maxAlternatives = 1;
+
+    rec.onstart = () => {
+      setIsBackgroundListening(true);
+      isBackgroundListeningRef.current = true;
+    };
+
+    rec.onresult = (event: any) => {
+      let final = "";
+      let interim = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const t = event.results[i][0].transcript;
+        event.results[i].isFinal ? (final += t) : (interim += t);
+      }
+
+      const full = final || interim;
+      if (!full) return;
+
+      // Detect wake word only when not already active
+      if (!isActiveRef.current && containsWakeWord(full)) {
+        isActiveRef.current = true;
+        setIsActive(true);
+        transcriptBufferRef.current = "";
+        setTranscript("");
+        optionsRef.current.onActivation?.();
+      }
+
+      // Buffer speech while active and reset the silence deadline
+      if (isActiveRef.current) {
+        transcriptBufferRef.current +=
+          (transcriptBufferRef.current ? " " : "") + full;
+        setTranscript(transcriptBufferRef.current.trim());
+        clearSilenceTimer();
+        silenceTimerRef.current = setTimeout(
+          handleSilenceTimeout,
+          silenceTimeout
+        );
+      }
+    };
+
+    rec.onerror = (event: any) => {
+      // no-speech and aborted are normal during silence / intentional stop
+      if (event.error === "no-speech" || event.error === "aborted") return;
+      if (event.error === "not-allowed") {
+        setError("Permiso de microfono denegado");
+        return;
+      }
+      console.warn("[useVoiceActivation] error:", event.error);
+    };
+
+    rec.onend = () => {
+      recognitionRef.current = null;
+      // Auto-restart only if we are supposed to be listening AND not paused.
+      // This is what keeps background listening alive through natural end events,
+      // while respecting deliberate pauses during TTS playback.
+      if (isBackgroundListeningRef.current && !isPausedRef.current) {
+        const next = buildRecognition();
+        if (!next) return;
+        recognitionRef.current = next;
+        try {
+          next.start();
+        } catch {
+          // Already starting — ignore
+        }
+      }
+    };
+
+    return rec;
+  }, [
+    language,
+    containsWakeWord,
+    handleSilenceTimeout,
+    silenceTimeout,
+    clearSilenceTimer,
+  ]);
+
+  const startBackgroundListening = useCallback(() => {
+    const SR =
+      (window as any).SpeechRecognition ||
+      (window as any).webkitSpeechRecognition;
+    if (!SR) {
+      setError("Reconocimiento de voz no soportado en este navegador");
+      return;
+    }
+
+    setError(null);
+    isBackgroundListeningRef.current = true;
+    isPausedRef.current = false;
+
+    const rec = buildRecognition();
+    if (!rec) return;
+    recognitionRef.current = rec;
+    try {
+      rec.start();
+    } catch (err: any) {
+      setError(`Error al iniciar reconocimiento: ${err.message}`);
+    }
+  }, [buildRecognition]);
+
+  const stopBackgroundListening = useCallback(() => {
+    isBackgroundListeningRef.current = false;
+    isPausedRef.current = false;
+    clearSilenceTimer();
+
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {}
+      recognitionRef.current = null;
     }
 
     setIsBackgroundListening(false);
     setIsActive(false);
     isActiveRef.current = false;
-    isBackgroundListeningRef.current = false;
+  }, [clearSilenceTimer]);
+
+  /**
+   * Pause recognition while TTS is speaking.
+   * The onend handler will NOT auto-restart while isPausedRef is true,
+   * so the microphone stays closed and cannot pick up synthesized speech.
+   */
+  const pauseRecognition = useCallback(() => {
+    isPausedRef.current = true;
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {}
+    }
   }, []);
 
-  // Reset active state (called after analysis is complete)
+  /**
+   * Resume recognition after TTS finishes.
+   * A short delay ensures the speaker has fully stopped before the mic reopens,
+   * preventing the tail end of synthesized audio from triggering wake words.
+   */
+  const resumeRecognition = useCallback(() => {
+    if (!isBackgroundListeningRef.current) return;
+    isPausedRef.current = false;
+
+    // 350ms gives the OS audio pipeline time to flush the TTS output
+    setTimeout(() => {
+      if (isPausedRef.current || !isBackgroundListeningRef.current) return;
+      if (recognitionRef.current) return; // already restarted via onend
+
+      const rec = buildRecognition();
+      if (!rec) return;
+      recognitionRef.current = rec;
+      try {
+        rec.start();
+      } catch {}
+    }, 350);
+  }, [buildRecognition]);
+
+  /**
+   * Reset active state after an analysis cycle completes.
+   * Does NOT restart recognition manually — the onend handler handles that
+   * automatically once isPausedRef is false, avoiding the previous
+   * setTimeout(100) race condition.
+   */
   const resetActive = useCallback(() => {
     isActiveRef.current = false;
     setIsActive(false);
     transcriptBufferRef.current = "";
     setTranscript("");
+    clearSilenceTimer();
+  }, [clearSilenceTimer]);
 
-    if (silenceTimerRef.current) {
-      clearTimeout(silenceTimerRef.current);
-      silenceTimerRef.current = null;
-    }
-
-    // Restart background listening
-    if (isBackgroundListeningRef.current) {
-      stopBackgroundListening();
-      setTimeout(() => {
-        startBackgroundListening();
-      }, 100);
-    }
-  }, [startBackgroundListening, stopBackgroundListening]);
-
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       stopBackgroundListening();
@@ -239,6 +264,8 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     error,
     startBackgroundListening,
     stopBackgroundListening,
+    pauseRecognition,
+    resumeRecognition,
     resetActive,
   };
 }

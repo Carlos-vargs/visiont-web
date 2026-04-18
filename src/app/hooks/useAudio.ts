@@ -5,14 +5,18 @@ type AudioOptions = {
   receiveSampleRate?: number;
   chunkSize?: number;
   enableEchoCancellation?: boolean;
-  workletUrl?: string; // URL al worklet compilado (opcional)
 };
 
-// Función auxiliar: Int16Array → Base64
+type SpeechQueueItem = {
+  text: string;
+  resolve: () => void;
+};
+
+// Int16Array -> Base64
 const int16ToBase64 = (int16Array: Int16Array): string => {
   const uint8Array = new Uint8Array(int16Array.buffer);
-  let binary = '';
-  const chunkSize = 0x8000; // Evitar stack overflow en strings grandes
+  let binary = "";
+  const chunkSize = 0x8000;
   for (let i = 0; i < uint8Array.length; i += chunkSize) {
     const chunk = uint8Array.subarray(i, i + chunkSize);
     binary += String.fromCharCode(...chunk);
@@ -20,7 +24,6 @@ const int16ToBase64 = (int16Array: Int16Array): string => {
   return btoa(binary);
 };
 
-// Código inline del worklet para fallback (desarrollo)
 const getInlineWorkletCode = (chunkSize: number) => `
   class AudioProcessor extends AudioWorkletProcessor {
     constructor(options) {
@@ -64,9 +67,9 @@ const getInlineWorkletCode = (chunkSize: number) => `
 export function useAudio(options: AudioOptions = {}) {
   const {
     sendSampleRate = 16000,
-    receiveSampleRate = 24000,
     chunkSize = 1024,
     enableEchoCancellation = false,
+    receiveSampleRate = 24000,
   } = options;
 
   const [isListening, setIsListening] = useState(false);
@@ -78,14 +81,22 @@ export function useAudio(options: AudioOptions = {}) {
   const audioContextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const audioWorkletNodeRef = useRef<AudioWorkletNode | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const playbackQueueRef = useRef<AudioBuffer[]>([]);
-  const playbackContextRef = useRef<AudioContext | null>(null);
-  const isPlayingRef = useRef(false);
   const workletBlobUrlRef = useRef<string | null>(null);
   const onAudioChunkRef = useRef<((chunkBase64: string) => void) | null>(null);
 
-  // Cleanup de blob URLs del worklet
+  // Playback
+  const playbackContextRef = useRef<AudioContext | null>(null);
+  const playbackQueueRef = useRef<AudioBuffer[]>([]);
+  const isPlayingRef = useRef(false);
+
+  // Speech synthesis queue — ensures utterances play sequentially with no overlap
+  const speechQueueRef = useRef<SpeechQueueItem[]>([]);
+  const isSpeechProcessingRef = useRef(false);
+  // Tracks the utterance currently being spoken so cancelSpeech can abort it
+  const currentUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+
+  // --- Worklet helpers ---
+
   const cleanupWorkletUrl = useCallback(() => {
     if (workletBlobUrlRef.current) {
       URL.revokeObjectURL(workletBlobUrlRef.current);
@@ -93,56 +104,45 @@ export function useAudio(options: AudioOptions = {}) {
     }
   }, []);
 
-  const loadWorkletModule = useCallback(async (context: AudioContext): Promise<string> => {
-    try {
-      // En producción, el worklet se emite a assets/worklets/
-      // En desarrollo, Vite sirve desde src/
-      const isDev = import.meta.env.DEV;
-      
-      let workletSrc: string;
-      
-      if (isDev) {
-        // Desarrollo: importar directamente y crear blob
-        const workletModule = await import('./audio-processor.worklet.ts?worker&url');
-        workletSrc = workletModule.default;
-      } else {
-        // Producción: usar ruta relativa a dist/assets/worklets/
-        // Vite inyectará el hash correcto en build
-        workletSrc = new URL(
-          './audio-processor.worklet.ts?worker&url', 
-          import.meta.url
-        ).href;
+  const loadWorkletModule = useCallback(
+    async (context: AudioContext): Promise<void> => {
+      try {
+        const isDev = import.meta.env.DEV;
+        let src: string;
+        if (isDev) {
+          const mod = await import("./audio-processor.worklet.ts?worker&url");
+          src = mod.default;
+        } else {
+          src = new URL(
+            "./audio-processor.worklet.ts?worker&url",
+            import.meta.url
+          ).href;
+        }
+        await context.audioWorklet.addModule(src);
+      } catch {
+        // Fallback: inline worklet via blob URL
+        const blob = new Blob([getInlineWorkletCode(chunkSize)], {
+          type: "application/javascript",
+        });
+        const url = URL.createObjectURL(blob);
+        workletBlobUrlRef.current = url;
+        await context.audioWorklet.addModule(url);
       }
-      
-      await context.audioWorklet.addModule(workletSrc);
-      return 'audio-processor';
-      
-    } catch (error) {
-      console.warn('Error cargando worklet externo, usando fallback inline:', error);
-      
-      // Fallback inline si falla la carga externa
-      const blob = new Blob([getInlineWorkletCode(chunkSize)], { 
-        type: 'application/javascript' 
-      });
-      const blobUrl = URL.createObjectURL(blob);
-      workletBlobUrlRef.current = blobUrl;
-      
-      await context.audioWorklet.addModule(blobUrl);
-      return 'audio-processor';
-    }
-  }, [chunkSize]);
+    },
+    [chunkSize]
+  );
+
+  // --- Microphone ---
 
   const startListening = useCallback(
     async (onAudioChunk?: (chunkBase64: string) => void) => {
       try {
         setError(null);
-        onAudioChunkRef.current = onAudioChunk || null;
+        onAudioChunkRef.current = onAudioChunk ?? null;
 
-        // Crear AudioContext
         const audioContext = new AudioContext({ sampleRate: sendSampleRate });
         audioContextRef.current = audioContext;
 
-        // Obtener acceso al micrófono
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: {
             echoCancellation: enableEchoCancellation,
@@ -153,21 +153,13 @@ export function useAudio(options: AudioOptions = {}) {
         });
         streamRef.current = stream;
 
-        // Crear source node
         const source = audioContext.createMediaStreamSource(stream);
 
-        // Analyser para visualización
-        const analyser = audioContext.createAnalyser();
-        analyser.fftSize = 256;
-        analyserRef.current = analyser;
-        source.connect(analyser);
-
-        // Cargar y configurar AudioWorklet
         await loadWorkletModule(audioContext);
-        
+
         const workletNode = new AudioWorkletNode(
           audioContext,
-          'audio-processor',
+          "audio-processor",
           {
             processorOptions: { chunkSize },
             numberOfInputs: 1,
@@ -177,230 +169,202 @@ export function useAudio(options: AudioOptions = {}) {
         );
         audioWorkletNodeRef.current = workletNode;
 
-        // Manejar mensajes del worklet
         workletNode.port.onmessage = (event: MessageEvent) => {
           const { type, pcmData, audioLevel: level } = event.data;
-          if (type === 'audio-chunk') {
+          if (type === "audio-chunk") {
             setAudioLevel(level);
             if (onAudioChunkRef.current && pcmData) {
-              const int16Array = new Int16Array(pcmData);
-              const base64 = int16ToBase64(int16Array);
+              const base64 = int16ToBase64(new Int16Array(pcmData));
               onAudioChunkRef.current(base64);
             }
           }
         };
 
-        // Conectar: source → [analyser, worklet] → destination
         source.connect(workletNode);
         workletNode.connect(audioContext.destination);
 
         setIsListening(true);
         setPermissionGranted(true);
       } catch (err: any) {
-        const errorMsg =
+        const msg =
           err.name === "NotAllowedError"
-            ? "Permiso de micrófono denegado. Habilita el acceso en la configuración del navegador."
-            : `Error al acceder al micrófono: ${err.message}`;
-        
-        setError(errorMsg);
+            ? "Permiso de microfono denegado. Habilita el acceso en la configuracion del navegador."
+            : `Error al acceder al microfono: ${err.message}`;
+        setError(msg);
         setIsListening(false);
         cleanupWorkletUrl();
-        
-        // Cleanup parcial en caso de error
-        if (audioContextRef.current) {
-          audioContextRef.current.close();
-          audioContextRef.current = null;
-        }
-        if (streamRef.current) {
-          streamRef.current.getTracks().forEach(track => track.stop());
-          streamRef.current = null;
-        }
+        audioContextRef.current?.close();
+        audioContextRef.current = null;
+        streamRef.current?.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
       }
     },
     [sendSampleRate, chunkSize, enableEchoCancellation, loadWorkletModule, cleanupWorkletUrl]
   );
 
   const stopListening = useCallback(() => {
-    // Detener worklet
     if (audioWorkletNodeRef.current) {
-      audioWorkletNodeRef.current.port.postMessage({ type: 'stop' });
+      audioWorkletNodeRef.current.port.postMessage({ type: "stop" });
       audioWorkletNodeRef.current.disconnect();
       audioWorkletNodeRef.current = null;
     }
-
-    // Detener stream de micrófono
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
-
-    // Cerrar AudioContext
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
-    }
-
-    // Limpiar blob URL
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+    audioContextRef.current?.close();
+    audioContextRef.current = null;
     cleanupWorkletUrl();
-
-    // Resetear estados
     setIsListening(false);
     setAudioLevel(0);
   }, [cleanupWorkletUrl]);
 
-  // Reproducir chunk de audio PCM en base64
-  const playAudioChunk = useCallback(async (chunkBase64: string) => {
-    try {
-      // Decodificar base64 a ArrayBuffer
-      const binaryString = atob(chunkBase64);
-      const bytes = new Uint8Array(binaryString.length);
-      for (let i = 0; i < binaryString.length; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
-      }
+  // --- PCM playback ---
 
-      // Convertir Int16 PCM a Float32 [-1, 1]
-      const int16Array = new Int16Array(bytes.buffer);
-      const float32Array = new Float32Array(int16Array.length);
-      for (let i = 0; i < int16Array.length; i++) {
-        float32Array[i] = int16Array[i] / (int16Array[i] < 0 ? 0x8000 : 0x7fff);
-      }
-
-      // Crear/reutilizar AudioContext para playback
-      if (!playbackContextRef.current || playbackContextRef.current.state === 'closed') {
-        playbackContextRef.current = new AudioContext({ sampleRate: receiveSampleRate });
-      }
-      const audioContext = playbackContextRef.current;
-
-      // Crear AudioBuffer
-      const audioBuffer = audioContext.createBuffer(
-        1, 
-        float32Array.length, 
-        receiveSampleRate
-      );
-      audioBuffer.getChannelData(0).set(float32Array);
-
-      // Agregar a cola de reproducción
-      playbackQueueRef.current.push(audioBuffer);
-
-      // Iniciar reproducción si no está activo
-      if (!isPlayingRef.current) {
-        isPlayingRef.current = true;
-        setIsSpeaking(true);
-        await processPlaybackQueue(audioContext);
-      }
-    } catch (err: any) {
-      setError(`Error al reproducir audio: ${err.message}`);
-      setIsSpeaking(false);
-      isPlayingRef.current = false;
-    }
-  }, [receiveSampleRate]);
-
-  // Procesar cola de reproducción (función interna)
-  const processPlaybackQueue = useCallback(async (audioContext: AudioContext) => {
+  const processPlaybackQueue = useCallback(async (ctx: AudioContext) => {
     while (playbackQueueRef.current.length > 0) {
       const buffer = playbackQueueRef.current.shift();
       if (!buffer) continue;
-
-      const source = audioContext.createBufferSource();
+      const source = ctx.createBufferSource();
       source.buffer = buffer;
-      source.connect(audioContext.destination);
-
+      source.connect(ctx.destination);
       await new Promise<void>((resolve) => {
         source.onended = () => resolve();
         source.start();
       });
     }
-
     isPlayingRef.current = false;
     setIsSpeaking(false);
-    
-    // No cerramos el contexto aquí para permitir reutilización
-    // Se cerrará en cleanup o cuando se desmonte el componente
   }, []);
 
-  // Reproducir audio completo desde base64 (WAV/MP3/etc)
-  const playAudioFromBase64 = useCallback(
-    async (audioBase64: string, mimeType: string = "audio/wav") => {
+  const playAudioChunk = useCallback(
+    async (chunkBase64: string) => {
       try {
-        setIsSpeaking(true);
-        setError(null);
+        const bytes = Uint8Array.from(atob(chunkBase64), (c) =>
+          c.charCodeAt(0)
+        );
+        const int16 = new Int16Array(bytes.buffer);
+        const float32 = new Float32Array(int16.length);
+        for (let i = 0; i < int16.length; i++) {
+          float32[i] = int16[i] / (int16[i] < 0 ? 0x8000 : 0x7fff);
+        }
 
-        // Decodificar base64 via fetch
-        const response = await fetch(`data:${mimeType};base64,${audioBase64}`);
-        const arrayBuffer = await response.arrayBuffer();
+        if (
+          !playbackContextRef.current ||
+          playbackContextRef.current.state === "closed"
+        ) {
+          playbackContextRef.current = new AudioContext({
+            sampleRate: receiveSampleRate,
+          });
+        }
+        const ctx = playbackContextRef.current;
+        const buf = ctx.createBuffer(1, float32.length, receiveSampleRate);
+        buf.getChannelData(0).set(float32);
+        playbackQueueRef.current.push(buf);
 
-        // Crear AudioContext y decodificar
-        const audioContext = new AudioContext();
-        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-
-        // Reproducir
-        const source = audioContext.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(audioContext.destination);
-
-        await new Promise<void>((resolve) => {
-          source.onended = () => {
-            audioContext.close();
-            resolve();
-          };
-          source.start();
-        });
+        if (!isPlayingRef.current) {
+          isPlayingRef.current = true;
+          setIsSpeaking(true);
+          await processPlaybackQueue(ctx);
+        }
       } catch (err: any) {
         setError(`Error al reproducir audio: ${err.message}`);
-      } finally {
         setIsSpeaking(false);
+        isPlayingRef.current = false;
       }
     },
-    []
+    [receiveSampleRate, processPlaybackQueue]
   );
 
-  // Text-to-Speech con Web Speech API
-  const speakText = useCallback(async (text: string) => {
-    try {
-      setIsSpeaking(true);
+  // --- Speech synthesis queue ---
 
-      if ("speechSynthesis" in window) {
-        const utterance = new SpeechSynthesisUtterance(text);
+  /**
+   * Internal processor: dequeues and speaks one item at a time.
+   * The lock (isSpeechProcessingRef) prevents concurrent invocations.
+   */
+  const processSpeechQueue = useCallback(async () => {
+    if (isSpeechProcessingRef.current) return;
+    isSpeechProcessingRef.current = true;
+    setIsSpeaking(true);
+
+    while (speechQueueRef.current.length > 0) {
+      const item = speechQueueRef.current.shift()!;
+
+      await new Promise<void>((innerResolve) => {
+        const utterance = new SpeechSynthesisUtterance(item.text);
         utterance.lang = "es-ES";
         utterance.rate = 1.0;
         utterance.pitch = 1.0;
 
-        // Cargar voces y buscar español
-        await new Promise<void>((resolve) => {
-          if (window.speechSynthesis.onvoiceschanged !== undefined) {
-            window.speechSynthesis.onvoiceschanged = () => resolve();
-          }
-          resolve();
-        });
+        // Resolve the caller's outer promise when this utterance finishes
+        utterance.onend = () => {
+          currentUtteranceRef.current = null;
+          item.resolve();
+          innerResolve();
+        };
+        utterance.onerror = () => {
+          currentUtteranceRef.current = null;
+          item.resolve();
+          innerResolve();
+        };
 
+        // Voice selection deferred to speak time so voices are loaded
         const voices = window.speechSynthesis.getVoices();
-        const spanishVoice = voices.find(
-          (voice) => voice.lang.startsWith("es") || voice.lang.includes("Spanish")
+        const spanish = voices.find(
+          (v) => v.lang.startsWith("es") || v.lang.includes("Spanish")
         );
-        if (spanishVoice) {
-          utterance.voice = spanishVoice;
-        }
+        if (spanish) utterance.voice = spanish;
 
-        await new Promise<void>((resolve) => {
-          utterance.onend = () => resolve();
-          utterance.onerror = () => resolve();
-          window.speechSynthesis.speak(utterance);
-        });
-      } else {
-        setError("Web Speech API no disponible en este navegador");
-      }
-    } catch (err: any) {
-      setError(`Error al hablar: ${err.message}`);
-    } finally {
-      setIsSpeaking(false);
+        currentUtteranceRef.current = utterance;
+        window.speechSynthesis.speak(utterance);
+      });
     }
+
+    isSpeechProcessingRef.current = false;
+    setIsSpeaking(false);
   }, []);
 
-  // Solicitar permiso de micrófono (sin iniciar captura)
+  /**
+   * Speak text sequentially.
+   * If the queue is already running, the new text is appended and will play
+   * after the current utterance finishes — no overlap, no cancellation.
+   * Returns a promise that resolves when this specific text has been spoken.
+   */
+  const speakText = useCallback(
+    async (text: string): Promise<void> => {
+      if (!("speechSynthesis" in window)) {
+        setError("Web Speech API no disponible en este navegador");
+        return;
+      }
+      return new Promise<void>((resolve) => {
+        speechQueueRef.current.push({ text, resolve });
+        processSpeechQueue();
+      });
+    },
+    [processSpeechQueue]
+  );
+
+  /**
+   * Immediately stop all pending and in-progress speech.
+   * Resolves all queued promises so callers do not hang.
+   * Use this before cancelling an analysis or when the user requests stop.
+   */
+  const cancelSpeech = useCallback(() => {
+    // Resolve and discard all pending items
+    const pending = speechQueueRef.current.splice(0);
+    pending.forEach((item) => item.resolve());
+
+    // Stop whatever is currently being spoken
+    window.speechSynthesis.cancel();
+    currentUtteranceRef.current = null;
+    isSpeechProcessingRef.current = false;
+    setIsSpeaking(false);
+  }, []);
+
+  // --- Permission helper ---
+
   const requestMicrophonePermission = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      stream.getTracks().forEach((track) => track.stop());
+      stream.getTracks().forEach((t) => t.stop());
       setPermissionGranted(true);
       return true;
     } catch {
@@ -409,20 +373,23 @@ export function useAudio(options: AudioOptions = {}) {
     }
   }, []);
 
-  // Cleanup al desmontar componente
+  // --- Cleanup ---
+
   useEffect(() => {
     return () => {
       stopListening();
-      
-      // Cleanup adicional de playback
-      if (playbackContextRef.current && playbackContextRef.current.state !== 'closed') {
+      cancelSpeech();
+      if (
+        playbackContextRef.current &&
+        playbackContextRef.current.state !== "closed"
+      ) {
         playbackContextRef.current.close();
         playbackContextRef.current = null;
       }
       playbackQueueRef.current = [];
       isPlayingRef.current = false;
     };
-  }, [stopListening]);
+  }, [stopListening, cancelSpeech]);
 
   return {
     isListening,
@@ -433,8 +400,8 @@ export function useAudio(options: AudioOptions = {}) {
     startListening,
     stopListening,
     playAudioChunk,
-    playAudioFromBase64,
     speakText,
+    cancelSpeech,
     requestMicrophonePermission,
   };
 }

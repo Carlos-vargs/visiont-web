@@ -7,7 +7,6 @@ import { useCamera } from "../hooks/useCamera";
 import { useAudio } from "../hooks/useAudio";
 import { useGemini } from "../hooks/useGemini";
 import { useVoiceActivation } from "../hooks/useVoiceActivation";
-import { FeedbackModal } from "./FeedbackModal";
 
 type BoundingBox = {
   id: number;
@@ -33,6 +32,8 @@ type DetectionResult = {
 const isDevelopment = import.meta.env.VITE_ENVIRONMENT !== "production";
 
 export function CameraView() {
+  // ─── State ───────────────────────────────────────────────────────────────────
+
   const [activeBoxes, setActiveBoxes] = useState<BoundingBox[]>([]);
   const [scanning, setScanning] = useState(true);
   const [scanLine, setScanLine] = useState(0);
@@ -40,29 +41,20 @@ export function CameraView() {
   const [feedbackText, setFeedbackText] = useState("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isListening, setIsListening] = useState(false);
-  const [voiceActivationEnabled, setVoiceActivationEnabled] = useState(true);
+  const [voiceActivationEnabled] = useState(true);
 
   const captureTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
-  const isSpeakingRef = useRef(false);
   const isAnalysisInProgressRef = useRef(false);
-  const isListeningRef = useRef(false);
-  const isAnalyzingRef = useRef(false);
+
+  // Stable refs for voice activation callbacks (avoids stale closure captures)
   const executeSingleAnalysisRef = useRef<
     ((transcript?: string) => Promise<void>) | null
   >(null);
   const startVoiceListeningRef = useRef<(() => Promise<void>) | null>(null);
 
-  // Keep refs updated
-  useEffect(() => {
-    isListeningRef.current = isListening;
-  }, [isListening]);
+  // ─── Hooks ────────────────────────────────────────────────────────────────────
 
-  useEffect(() => {
-    isAnalyzingRef.current = isAnalyzing;
-  }, [isAnalyzing]);
-
-  // Hooks
   const {
     isActive: cameraActive,
     error: cameraError,
@@ -82,28 +74,23 @@ export function CameraView() {
   });
 
   const {
-    isListening: audioListening,
     isSpeaking: audioSpeaking,
     error: audioError,
     audioLevel,
     startListening: startAudioListening,
     stopListening: stopAudioListening,
     speakText,
+    cancelSpeech,
     requestMicrophonePermission,
-  } = useAudio({
-    sendSampleRate: 16000,
-    enableEchoCancellation: true,
-  });
+  } = useAudio({ sendSampleRate: 16000, enableEchoCancellation: true });
 
   const {
     isConnected: geminiConnected,
     isLoading: geminiLoading,
     error: geminiError,
     sendImageWithPrompt,
-    sendTextMessage,
   } = useGemini();
 
-  // Voice activation hook - listens for wake words in background
   const {
     isBackgroundListening,
     isActive: voiceActive,
@@ -111,267 +98,221 @@ export function CameraView() {
     transcript: userTranscript,
     error: voiceError,
     startBackgroundListening,
+    pauseRecognition,
+    resumeRecognition,
     resetActive,
   } = useVoiceActivation({
-    silenceTimeout: 4000, // Increased to 4 seconds for better UX
+    silenceTimeout: 4000,
     onActivation: () => {
-      console.log("Wake word detected, auto-activating microphone...");
-      // Only start listening if not already listening or analyzing
-      if (!isListeningRef.current && !isAnalyzingRef.current) {
-        if (startVoiceListeningRef.current) {
-          startVoiceListeningRef.current();
-        }
+      if (!isAnalysisInProgressRef.current) {
+        startVoiceListeningRef.current?.();
       }
     },
     onSilence: (transcript: string) => {
-      console.log(
-        "Silence detected, executing analysis with transcript:",
-        transcript,
-      );
-      // Only execute analysis if currently listening
-      if (isListeningRef.current) {
-        if (executeSingleAnalysisRef.current) {
-          executeSingleAnalysisRef.current(transcript);
-        }
-      }
+      executeSingleAnalysisRef.current?.(transcript);
     },
   });
 
-  // Log user transcript as they speak
+  // ─── Sync refs ────────────────────────────────────────────────────────────────
+
   useEffect(() => {
     if (userTranscript) {
       console.log("[Voice Transcript]", userTranscript);
     }
   }, [userTranscript]);
 
-  // Start listening when voice activation detects wake word
-  const startVoiceListening = useCallback(async () => {
-    const granted = await requestMicrophonePermission();
-    if (granted) {
-      setIsListening(true);
-      startAudioListening();
-      // Announce that we're listening
-      speakStatus("Escuchando");
-    }
-  }, [requestMicrophonePermission, startAudioListening, speakText]);
+  // ─── Scan line animation ──────────────────────────────────────────────────────
 
-  // Assign startVoiceListening to ref for voice activation callbacks
-  useEffect(() => {
-    startVoiceListeningRef.current = startVoiceListening;
-  }, [startVoiceListening]);
-
-  // Scan line animation
   useEffect(() => {
     let prog = 0;
-    const scanInterval = setInterval(() => {
+    const id = setInterval(() => {
       prog += 2;
       setScanLine(prog % 100);
     }, 40);
-    return () => clearInterval(scanInterval);
+    return () => clearInterval(id);
   }, []);
 
-  // Camera only activates/deactivates on mount/unmount
+  // ─── Mount / unmount ─────────────────────────────────────────────────────────
+
   useEffect(() => {
     startCamera();
 
-    // Start background voice activation (wake word detection)
     if (voiceActivationEnabled) {
-      setTimeout(() => {
-        startBackgroundListening();
-      }, 1000); // Delay to let camera initialize
+      // Small delay so camera initialization does not compete with mic permission
+      const t = setTimeout(() => startBackgroundListening(), 1000);
+      return () => {
+        clearTimeout(t);
+        stopCamera();
+        cancelAnalysis();
+      };
     }
 
     return () => {
       stopCamera();
       cancelAnalysis();
     };
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Speak status message (non-blocking, fire-and-forget)
-  const speakStatus = useCallback(
+  // ─── Centralized speech ───────────────────────────────────────────────────────
+
+  /**
+   * Single entry point for all TTS output.
+   *
+   * Before speaking: pauses SpeechRecognition so the microphone cannot pick up
+   * synthesized audio and accidentally re-trigger analysis (feedback loop).
+   * After speaking: resumes recognition with a built-in 350 ms settling delay
+   * (handled inside resumeRecognition) so the OS audio pipeline has time to flush.
+   *
+   * Uses the sequential speech queue from useAudio — calls never overlap.
+   */
+  const speak = useCallback(
     async (text: string) => {
-      // Cancel any ongoing speech before speaking new status
-      window.speechSynthesis.cancel();
-      isSpeakingRef.current = true;
-
-      try {
-        await speakText(text);
-      } finally {
-        isSpeakingRef.current = false;
-      }
+      pauseRecognition();
+      await speakText(text);
+      resumeRecognition();
     },
-    [speakText],
+    [speakText, pauseRecognition, resumeRecognition],
   );
 
-  // Single analysis - ONE request only, no loops
+  // ─── Analysis ────────────────────────────────────────────────────────────────
+
   const executeSingleAnalysis = useCallback(
     async (userTranscript?: string) => {
-      // Prevent multiple simultaneous analyses
-      if (isAnalysisInProgressRef.current) {
-        console.warn("Analysis already in progress, ignoring request");
-        return;
-      }
-
+      if (isAnalysisInProgressRef.current) return;
       isAnalysisInProgressRef.current = true;
+
+      // Stop mic input as soon as analysis begins — the microphone is no longer
+      // needed and keeping it open would capture audio we discard anyway.
+      stopAudioListening();
+      setIsListening(false);
       setIsAnalyzing(true);
 
-      // Announce analysis started
-      speakStatus("Analizando");
-
-      // Create abort controller for this request
       abortControllerRef.current = new AbortController();
+      const signal = abortControllerRef.current.signal;
+
+      await speak("Analizando");
 
       try {
         const frame = captureFrame();
-        if (!frame || !abortControllerRef.current) {
-          isAnalysisInProgressRef.current = false;
-          setIsAnalyzing(false);
-          return;
-        }
+        if (!frame || signal.aborted) return;
 
-        // Build dynamic prompt based on user transcript
-        const basePrompt = "Analiza la imagen de la cámara.";
-        const contextPrompt = userTranscript
-          ? `El usuario dijo: "${userTranscript}". Responde a lo que pide el usuario basándote en lo que ves en la imagen. ` +
-            `Si el usuario pide identificar objetos, proporciona máximo 4 objetos con distancias aproximadas. ` +
-            `Responde en formato JSON con 'feedback' (descripción respondiendo al usuario) y 'detections' (máximo 4 objetos si aplica).`
-          : `Describe lo que ves en esta imagen de la cámara. Identifica máximo 4 objetos principales. ` +
-            `Proporciona distancias aproximadas. Responde en formato JSON con 'feedback' (descripción general) y 'detections' (máximo 4 objetos).`;
+        const prompt = userTranscript
+          ? `El usuario dijo: "${userTranscript}". Responde a lo que pide basandote en la imagen. ` +
+            `Si solicita identificar objetos proporciona maximo 4 con distancias aproximadas. ` +
+            `Responde en JSON con 'feedback' y 'detections' (maximo 4 objetos si aplica).`
+          : `Describe lo que ves. Identifica maximo 4 objetos principales con distancias aproximadas. ` +
+            `Responde en JSON con 'feedback' y 'detections'.`;
 
-        const result = await sendImageWithPrompt(
-          frame,
-          contextPrompt || basePrompt,
-        );
+        const result = await sendImageWithPrompt(frame, prompt);
 
-        // Check if request was cancelled during processing
-        if (abortControllerRef.current?.signal.aborted) {
-          console.log("Analysis was cancelled, discarding result");
-          isAnalysisInProgressRef.current = false;
-          setIsAnalyzing(false);
-          return;
-        }
+        if (signal.aborted) return;
 
         setFeedbackText(result.feedback);
         setShowFeedback(true);
 
-        // Limit to 4 detections maximum
-        const maxDetections = result.detections.slice(0, 4);
-        const now = Date.now();
-        const boxes: BoundingBox[] = maxDetections.map((det, idx) => ({
-          id: now + idx,
-          ...det,
-          confidence: det.confidence || 90,
-        }));
+        const boxes: BoundingBox[] = result.detections
+          .slice(0, 4)
+          .map((det, idx) => ({
+            id: Date.now() + idx,
+            ...det,
+            confidence: det.confidence ?? 90,
+          }));
+        if (boxes.length > 0) setActiveBoxes(boxes);
 
-        if (boxes.length > 0) {
-          setActiveBoxes(boxes);
+        // speak() awaits completion before resumeRecognition is called,
+        // so recognition only reopens after the user has heard the full response.
+        if (!signal.aborted) {
+          await speak(result.feedback);
         }
-
-        // Speak feedback only if not cancelled and not already speaking
-        if (
-          !abortControllerRef.current?.signal.aborted &&
-          result.feedback &&
-          !isSpeakingRef.current
-        ) {
-          isSpeakingRef.current = true;
-          await speakText(result.feedback);
-          isSpeakingRef.current = false;
-        }
-
-        // Reset voice activation after analysis completes
-        resetActive();
       } catch (err: any) {
-        if (err.name === "AbortError") {
-          console.log("Analysis request aborted");
-          // Reset voice activation on abort
-          resetActive();
-        } else {
-          console.error("Error analyzing frame:", err);
-          // Reset voice activation on error
-          resetActive();
+        if (err.name !== "AbortError") {
+          console.error("[executeSingleAnalysis] error:", err);
         }
       } finally {
         isAnalysisInProgressRef.current = false;
         setIsAnalyzing(false);
         abortControllerRef.current = null;
+        // resetActive clears wake-word state; recognition restart is handled
+        // automatically by the onend handler in useVoiceActivation.
+        resetActive();
       }
     },
-    [captureFrame, sendImageWithPrompt, speakText, speakStatus, resetActive],
+    [captureFrame, sendImageWithPrompt, speak, stopAudioListening, resetActive],
   );
 
-  // Assign executeSingleAnalysis to ref for voice activation callbacks
-  useEffect(() => {
-    executeSingleAnalysisRef.current = executeSingleAnalysis;
-  }, [executeSingleAnalysis]);
-
-  // Cancel ongoing analysis
   const cancelAnalysis = useCallback(() => {
-    // Only announce cancellation if there was actually something to cancel
-    const hadAnalysis =
-      isAnalysisInProgressRef.current || abortControllerRef.current;
+    const hadActivity =
+      isAnalysisInProgressRef.current || !!abortControllerRef.current;
 
-    // Abort the request if possible
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-    }
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
 
-    // Stop any pending timeouts
     if (captureTimeoutRef.current) {
       clearTimeout(captureTimeoutRef.current);
       captureTimeoutRef.current = null;
     }
 
-    // Stop speaking if active
-    window.speechSynthesis.cancel();
-    isSpeakingRef.current = false;
+    // cancelSpeech clears the queue and stops any in-progress utterance cleanly
+    cancelSpeech();
 
-    // Reset states
     isAnalysisInProgressRef.current = false;
     setIsAnalyzing(false);
-
-    // Reset voice activation
+    setIsListening(false);
     resetActive();
 
-    // Announce cancellation only if user actually started an analysis
-    if (hadAnalysis) {
-      speakStatus("Cancelando");
+    if (hadActivity) {
+      // Fire-and-forget: user is informed but we do not block on it
+      speak("Cancelando");
     }
-  }, [speakStatus, resetActive]);
+  }, [cancelSpeech, speak, resetActive]);
 
-  const handleSpeakFeedback = () => {
-    if (feedbackText) {
-      speakText(feedbackText);
-    }
-  };
+  // ─── Assign stable refs for voice activation callbacks ───────────────────────
 
-  // Mic button handler - STRICTLY 1 request per activation
+  useEffect(() => {
+    executeSingleAnalysisRef.current = executeSingleAnalysis;
+  }, [executeSingleAnalysis]);
+
+  // ─── Voice listening (started by wake word) ──────────────────────────────────
+
+  const startVoiceListening = useCallback(async () => {
+    const granted = await requestMicrophonePermission();
+    if (!granted) return;
+    setIsListening(true);
+    startAudioListening();
+    // Inform the user without overriding any in-progress speech
+    speak("Escuchando");
+  }, [requestMicrophonePermission, startAudioListening, speak]);
+
+  useEffect(() => {
+    startVoiceListeningRef.current = startVoiceListening;
+  }, [startVoiceListening]);
+
+  // ─── Mic button ───────────────────────────────────────────────────────────────
+
+  /**
+   * State machine:
+   *   analyzing  -> cancel
+   *   listening  -> stop mic + run analysis immediately (no transcript)
+   *   idle       -> request permission + start listening
+   */
   const handleMicPress = useCallback(async () => {
-    // State 1: Currently analyzing → CANCEL
     if (isAnalyzing) {
       cancelAnalysis();
-      setIsListening(false);
       return;
     }
 
-    // State 2: Currently listening → STOP & EXECUTE ONE ANALYSIS
     if (isListening) {
       stopAudioListening();
       setIsListening(false);
-
-      // Execute EXACTLY ONE analysis - no loops (no transcript from manual press)
-      await executeSingleAnalysis();
+      await executeSingleAnalysis(); // no transcript — manual trigger
       return;
     }
 
-    // State 3: Idle → START LISTENING
     const granted = await requestMicrophonePermission();
-    if (granted) {
-      setIsListening(true);
-      startAudioListening();
-      // Announce that we're listening
-      speakStatus("Escuchando, tocar para analizar");
-    }
+    if (!granted) return;
+    setIsListening(true);
+    startAudioListening();
+    speak("Escuchando, tocar para analizar");
   }, [
     isAnalyzing,
     isListening,
@@ -380,8 +321,14 @@ export function CameraView() {
     executeSingleAnalysis,
     requestMicrophonePermission,
     startAudioListening,
-    speakStatus,
+    speak,
   ]);
+
+  // ─── Replay last feedback ─────────────────────────────────────────────────────
+
+  const handleSpeakFeedback = useCallback(() => {
+    if (feedbackText) speak(feedbackText);
+  }, [feedbackText, speak]);
 
   return (
     <>
