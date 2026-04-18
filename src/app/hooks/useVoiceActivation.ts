@@ -27,9 +27,6 @@ const DEFAULT_SILENCE_TIMEOUT = 2000;
 const RESTART_DELAY_MS = 400;
 const IGNORE_RESULTS_DELAY_MS = 1000;
 const DUPLICATE_WAKE_WORD_WINDOW_MS = 1500;
-const NETWORK_RETRY_BASE_DELAY_MS = 1200;
-const NETWORK_RETRY_MAX_DELAY_MS = 12000;
-const NETWORK_RETRY_LIMIT = 5;
 
 const normalizeText = (value: string): string =>
   value
@@ -91,8 +88,6 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
   const interimTranscriptRef = useRef("");
   const ignoreResultsUntilRef = useRef(0);
   const lastWakeActivationRef = useRef({ text: "", at: 0 });
-  const networkRetryCountRef = useRef(0);
-  const restartDelayOverrideRef = useRef<number | null>(null);
   const optionsRef = useRef<Required<VoiceActivationOptions>>({
     wakeWords: DEFAULT_WAKE_WORDS,
     silenceTimeout: DEFAULT_SILENCE_TIMEOUT,
@@ -129,25 +124,6 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     transcriptPartsRef.current = [];
     transcriptSetRef.current = new Set();
     interimTranscriptRef.current = "";
-  }, []);
-
-  const resetNetworkRetryState = useCallback(() => {
-    networkRetryCountRef.current = 0;
-    restartDelayOverrideRef.current = null;
-  }, []);
-
-  const getNetworkRetryDelay = useCallback(() => {
-    const retryIndex = Math.max(networkRetryCountRef.current - 1, 0);
-    return Math.min(
-      NETWORK_RETRY_BASE_DELAY_MS * 2 ** retryIndex,
-      NETWORK_RETRY_MAX_DELAY_MS,
-    );
-  }, []);
-
-  const getRestartDelay = useCallback(() => {
-    const restartDelay = restartDelayOverrideRef.current ?? RESTART_DELAY_MS;
-    restartDelayOverrideRef.current = null;
-    return restartDelay;
   }, []);
 
   const updateTranscriptState = useCallback(() => {
@@ -245,9 +221,6 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
         return;
       }
 
-      resetNetworkRetryState();
-      setError(null);
-
       if (!isActiveRef.current) {
         const commandAfterWakeWord = extractCommandAfterWakeWord(
           latestChunk,
@@ -297,12 +270,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
       updateTranscriptState();
       scheduleSilenceTimeout();
     },
-    [
-      activateListening,
-      resetNetworkRetryState,
-      scheduleSilenceTimeout,
-      updateTranscriptState,
-    ],
+    [activateListening, scheduleSilenceTimeout, updateTranscriptState],
   );
 
   const createRecognition = useCallback(() => {
@@ -331,19 +299,6 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
 
     recognition.onresult = handleRecognitionResult;
 
-    const stopRecognitionAfterTerminalError = () => {
-      shouldKeepRecognitionAliveRef.current = false;
-      recognitionStatusRef.current = "stopping";
-      setIsBackgroundListening(false);
-
-      try {
-        recognition.abort();
-      } catch (abortError) {
-        recognitionStatusRef.current = "idle";
-        console.warn("No se pudo abortar el reconocimiento:", abortError);
-      }
-    };
-
     recognition.onerror = (event: any) => {
       if (event.error === "no-speech" || event.error === "aborted") {
         return;
@@ -351,42 +306,13 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
 
       if (event.error === "not-allowed") {
         setError("Permiso de micrófono denegado");
-        stopRecognitionAfterTerminalError();
+        shouldKeepRecognitionAliveRef.current = false;
+        setIsBackgroundListening(false);
         return;
       }
 
       if (event.error === "audio-capture") {
         setError("No se pudo acceder al micrófono");
-        stopRecognitionAfterTerminalError();
-        return;
-      }
-
-      if (event.error === "service-not-allowed") {
-        setError("El navegador bloqueó el servicio de reconocimiento de voz");
-        stopRecognitionAfterTerminalError();
-        return;
-      }
-
-      if (event.error === "network") {
-        networkRetryCountRef.current += 1;
-        setIsBackgroundListening(false);
-
-        if (typeof navigator !== "undefined" && navigator.onLine === false) {
-          setError("Sin conexión. Revisa internet y vuelve a activar el micrófono.");
-          stopRecognitionAfterTerminalError();
-          return;
-        }
-
-        if (networkRetryCountRef.current > NETWORK_RETRY_LIMIT) {
-          setError(
-            "El reconocimiento de voz del navegador no está disponible ahora. Toca el micrófono para reintentar.",
-          );
-          stopRecognitionAfterTerminalError();
-          return;
-        }
-
-        restartDelayOverrideRef.current = getNetworkRetryDelay();
-        setError("No pude conectar con el reconocimiento de voz. Reintentando...");
         return;
       }
 
@@ -408,8 +334,6 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
       }
 
       clearRestartTimer();
-      const restartDelay = getRestartDelay();
-
       restartTimerRef.current = setTimeout(() => {
         if (!shouldKeepRecognitionAliveRef.current) {
           return;
@@ -427,17 +351,12 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
           recognitionStatusRef.current = "idle";
           console.warn("No se pudo reiniciar el reconocimiento:", restartError);
         }
-      }, restartDelay);
+      }, RESTART_DELAY_MS);
     };
 
     recognitionRef.current = recognition;
     return recognition;
-  }, [
-    clearRestartTimer,
-    getNetworkRetryDelay,
-    getRestartDelay,
-    handleRecognitionResult,
-  ]);
+  }, [clearRestartTimer, handleRecognitionResult]);
 
   const ensureRecognitionStarted = useCallback(() => {
     const recognition = createRecognition();
@@ -447,8 +366,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
 
     if (
       recognitionStatusRef.current === "running" ||
-      recognitionStatusRef.current === "starting" ||
-      recognitionStatusRef.current === "stopping"
+      recognitionStatusRef.current === "starting"
     ) {
       return;
     }
@@ -467,10 +385,9 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
 
   const startBackgroundListening = useCallback(() => {
     setError(null);
-    resetNetworkRetryState();
     shouldKeepRecognitionAliveRef.current = true;
     ensureRecognitionStarted();
-  }, [ensureRecognitionStarted, resetNetworkRetryState]);
+  }, [ensureRecognitionStarted]);
 
   const stopBackgroundListening = useCallback(() => {
     shouldKeepRecognitionAliveRef.current = false;
@@ -495,11 +412,10 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
 
   const startManualListening = useCallback(() => {
     setError(null);
-    resetNetworkRetryState();
     shouldKeepRecognitionAliveRef.current = true;
     ensureRecognitionStarted();
     activateListening("manual");
-  }, [activateListening, ensureRecognitionStarted, resetNetworkRetryState]);
+  }, [activateListening, ensureRecognitionStarted]);
 
   const submitActiveListening = useCallback(
     async (submitOptions?: SubmitOptions) => {
