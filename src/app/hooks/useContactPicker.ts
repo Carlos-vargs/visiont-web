@@ -1,10 +1,20 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
+import {
+  getNativeBridgeCapabilities,
+  getNativeContactsPermissionStatus,
+  listNativeContacts,
+  pickNativeContact,
+  placeNativeCall,
+  requestNativeContactsPermission,
+  type NativePermissionStatus,
+} from "../lib/nativeBridge";
 
 export type Contact = {
   id: string;
   name: string;
   phone: string;
   relation?: string;
+  initials?: string;
   isEmergency?: boolean;
 };
 
@@ -13,133 +23,481 @@ type UseContactPickerOptions = {
   onError?: (error: string) => void;
 };
 
+type ContactPickerNavigator = Navigator & {
+  contacts?: {
+    select?: (
+      properties: readonly string[],
+      options?: { multiple?: boolean; hint?: string },
+    ) => Promise<Array<{ name?: string[]; tel?: string[] }>>;
+  };
+};
+
+const STORAGE_KEY = "sos-contacts";
+
+const normalizeText = (value: string): string =>
+  value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const getInitials = (name: string): string =>
+  name
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => part[0])
+    .join("")
+    .toUpperCase()
+    .slice(0, 2);
+
+const normalizePhone = (phone: string): string => phone.replace(/[^\d+]/g, "");
+
+const hasBrowserContactPickerSupport = (): boolean => {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  const nav = navigator as ContactPickerNavigator;
+  return typeof nav.contacts?.select === "function";
+};
+
+const readStoredContacts = (): Contact[] => {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (!stored) {
+      return [];
+    }
+
+    const parsed = JSON.parse(stored);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    console.warn("Error loading saved contacts:", error);
+    return [];
+  }
+};
+
+const persistContacts = (contacts: Contact[]) => {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(contacts));
+  } catch (error) {
+    console.warn("Error saving contacts:", error);
+  }
+};
+
+const mergeUniqueContacts = (contacts: Contact[]): Contact[] => {
+  const byPhone = new Map<string, Contact>();
+
+  for (const contact of contacts) {
+    const normalizedPhone = normalizePhone(contact.phone);
+    const key = normalizedPhone || contact.id;
+    byPhone.set(key, {
+      ...contact,
+      phone: normalizedPhone || contact.phone,
+      initials: contact.initials || getInitials(contact.name),
+    });
+  }
+
+  return Array.from(byPhone.values());
+};
+
+const toContact = (
+  value: Partial<Contact> & { name?: string; phone?: string },
+  fallbackRelation = "Contacto del dispositivo",
+): Contact | null => {
+  const name = value.name?.trim() || "Contacto desconocido";
+  const phone = normalizePhone(value.phone || "");
+
+  if (!phone) {
+    return null;
+  }
+
+  return {
+    id: value.id || crypto.randomUUID(),
+    name,
+    phone,
+    relation: value.relation || fallbackRelation,
+    initials: value.initials || getInitials(name),
+    isEmergency: value.isEmergency ?? false,
+  };
+};
+
 export function useContactPicker(options: UseContactPickerOptions = {}) {
-  const [isSupported, setIsSupported] = useState(false);
+  const capabilities = getNativeBridgeCapabilities();
+
+  const [isSupported, setIsSupported] = useState(
+    () => hasBrowserContactPickerSupport() || capabilities.canReadContacts,
+  );
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedContacts, setSavedContacts] = useState<Contact[]>([]);
+  const [deviceContacts, setDeviceContacts] = useState<Contact[]>([]);
+  const [permissionStatus, setPermissionStatus] = useState<NativePermissionStatus>(
+    capabilities.canReadContacts ? "prompt" : "unsupported",
+  );
 
-  // Check if Contact Picker API is supported
+  const optionsRef = useRef(options);
+  const browserContactPickerSupportedRef = useRef(hasBrowserContactPickerSupport());
+  const nativeCapabilitiesRef = useRef(capabilities);
+
   useEffect(() => {
-    const supported = "ContactPicker" in window;
-    setIsSupported(supported);
-    
-    // Load saved contacts from localStorage
-    try {
-      const stored = localStorage.getItem("sos-contacts");
-      if (stored) {
-        setSavedContacts(JSON.parse(stored));
+    optionsRef.current = options;
+  }, [options]);
+
+  useEffect(() => {
+    const browserSupported = hasBrowserContactPickerSupport();
+    const nativeCapabilities = getNativeBridgeCapabilities();
+
+    browserContactPickerSupportedRef.current = browserSupported;
+    nativeCapabilitiesRef.current = nativeCapabilities;
+
+    setIsSupported(browserSupported || nativeCapabilities.canReadContacts);
+    setSavedContacts(readStoredContacts());
+
+    let isMounted = true;
+
+    const initializeNativeContacts = async () => {
+      if (!nativeCapabilities.canReadContacts) {
+        if (isMounted) {
+          setPermissionStatus("unsupported");
+        }
+        return;
       }
-    } catch (err) {
-      console.warn("Error loading saved contacts:", err);
-    }
+
+      const status = await getNativeContactsPermissionStatus();
+      if (!isMounted) {
+        return;
+      }
+
+      setPermissionStatus(status);
+
+      if (status === "granted") {
+        const contacts = await listNativeContacts();
+        if (!isMounted) {
+          return;
+        }
+
+        setDeviceContacts(
+          mergeUniqueContacts(
+            contacts
+              .map((contact) =>
+                toContact(
+                  {
+                    id: contact.id,
+                    name: contact.name,
+                    phone: contact.phone,
+                    relation: contact.relation || "Contacto del dispositivo",
+                  },
+                  "Contacto del dispositivo",
+                ),
+              )
+              .filter((contact): contact is Contact => Boolean(contact)),
+          ),
+        );
+      }
+    };
+
+    void initializeNativeContacts();
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
-  // Save contact to localStorage
-  const saveContact = useCallback((contact: Contact) => {
-    const updated = [...savedContacts, contact];
-    setSavedContacts(updated);
-    try {
-      localStorage.setItem("sos-contacts", JSON.stringify(updated));
-    } catch (err) {
-      console.warn("Error saving contact:", err);
-    }
-  }, [savedContacts]);
+  const saveContacts = useCallback((updater: (previous: Contact[]) => Contact[]) => {
+    setSavedContacts((previous) => {
+      const next = mergeUniqueContacts(updater(previous));
+      persistContacts(next);
+      return next;
+    });
+  }, []);
 
-  // Parse voice command to extract contact name
+  const clearError = useCallback(() => {
+    setError(null);
+  }, []);
+
+  const saveContact = useCallback(
+    (contact: Contact) => {
+      let selectedContact = contact;
+
+      saveContacts((previous) => {
+        const merged = mergeUniqueContacts([
+          ...previous,
+          {
+            ...contact,
+            initials: contact.initials || getInitials(contact.name),
+            phone: normalizePhone(contact.phone),
+          },
+        ]);
+
+        selectedContact =
+          merged.find(
+            (item) => normalizePhone(item.phone) === normalizePhone(contact.phone),
+          ) || selectedContact;
+
+        return merged;
+      });
+
+      optionsRef.current.onContactSelected?.(selectedContact);
+      return selectedContact;
+    },
+    [saveContacts],
+  );
+
+  const refreshDeviceContacts = useCallback(async () => {
+    if (!nativeCapabilitiesRef.current.canReadContacts) {
+      return [];
+    }
+
+    const contacts = await listNativeContacts();
+    const normalizedContacts = mergeUniqueContacts(
+      contacts
+        .map((contact) =>
+          toContact(
+            {
+              id: contact.id,
+              name: contact.name,
+              phone: contact.phone,
+              relation: contact.relation || "Contacto del dispositivo",
+            },
+            "Contacto del dispositivo",
+          ),
+        )
+        .filter((contact): contact is Contact => Boolean(contact)),
+    );
+
+    setDeviceContacts(normalizedContacts);
+    return normalizedContacts;
+  }, []);
+
+  const requestContactsAccess = useCallback(async () => {
+    if (!nativeCapabilitiesRef.current.canReadContacts) {
+      return {
+        granted: false,
+        contacts: [] as Contact[],
+      };
+    }
+
+    const status = await requestNativeContactsPermission();
+    setPermissionStatus(status);
+
+    if (status !== "granted") {
+      const message =
+        status === "denied"
+          ? "Permiso de contactos denegado."
+          : "No se pudo obtener permiso para leer tus contactos.";
+      setError(message);
+      optionsRef.current.onError?.(message);
+
+      return {
+        granted: false,
+        contacts: [] as Contact[],
+      };
+    }
+
+    const contacts = await refreshDeviceContacts();
+    return {
+      granted: true,
+      contacts,
+    };
+  }, [refreshDeviceContacts]);
+
   const parseContactName = useCallback((transcript: string): string | null => {
-    const lower = transcript.toLowerCase().trim();
-    
+    const normalized = normalizeText(transcript);
+    const cleaned = normalized
+      .replace(
+        /\b(por favor|porfa|ahora|ya|rapido|necesito|quiero|puedes|podrias|podrías|me|por)\b/g,
+        " ",
+      )
+      .replace(/\s+/g, " ")
+      .trim();
+
     const patterns = [
-      /llamar\s+a\s+(.+)/i,
-      /buscar\s+contacto\s+(.+)/i,
-      /contacto\s+(.+)/i,
-      /emergencia\s+(.+)/i,
+      /(?:llama|llamar|marca|marcar|contacta|contactar)\s+(?:a\s+)?(.+)/,
+      /(?:busca|buscar|buscame|encuentra|encontrar)\s+(?:a\s+)?(?:contacto\s+(?:de\s+)?)?(.+)/,
+      /(?:agrega|agregar|guarda|guardar)\s+(?:a\s+)?(.+?)(?:\s+como\s+contacto(?:\s+de\s+emergencia)?)?$/,
+      /(?:contacto\s+de\s+)?(.+)/,
     ];
-    
+
     for (const pattern of patterns) {
-      const match = lower.match(pattern);
-      if (match && match[1]?.trim()) {
-        return match[1].trim();
+      const match = cleaned.match(pattern);
+      if (match?.[1]?.trim()) {
+        return match[1]
+          .trim()
+          .replace(/\b(al|la|el|de)\s+final$/g, "")
+          .trim();
       }
     }
-    
-    if (lower.includes("emergencia") || lower.includes("ayuda")) {
+
+    if (cleaned.includes("emergencia") || cleaned.includes("ayuda")) {
       return "emergency";
     }
-    
+
     return null;
   }, []);
 
-  // Open native contact picker (requires user gesture)
-  const pickContact = useCallback(async (): Promise<Contact | null> => {
-    if (!isSupported) {
-      const msg = "Función no disponible en este dispositivo";
-      setError(msg);
-      options.onError?.(msg);
-      return null;
-    }
+  const findContactByName = useCallback(
+    (
+      name: string,
+      contacts: Contact[] = [...savedContacts, ...deviceContacts],
+    ): Contact | undefined => {
+      const normalizedQuery = normalizeText(name);
+      if (!normalizedQuery) {
+        return undefined;
+      }
 
+      const queryTokens = normalizedQuery.split(" ").filter(Boolean);
+
+      return contacts
+        .slice()
+        .sort((left, right) => left.name.length - right.name.length)
+        .find((contact) => {
+          const normalizedName = normalizeText(contact.name);
+          return (
+            normalizedName.includes(normalizedQuery) ||
+            queryTokens.every((token) => normalizedName.includes(token))
+          );
+        });
+    },
+    [deviceContacts, savedContacts],
+  );
+
+  const pickContact = useCallback(async (): Promise<Contact | null> => {
     try {
       setIsLoading(true);
       setError(null);
 
-      const props = ["name", "tel"] as const;
-      const opts = { multiple: false, hint: "Selecciona un contacto de emergencia" };
-      
-      // @ts-ignore - ContactPicker is not in TypeScript DOM types yet
-      const contacts = await navigator.contacts.select(props, opts);
-      
-      if (contacts && contacts[0]) {
-        const contact: Contact = {
-          id: crypto.randomUUID(),
-          name: contacts[0].name || "Contacto desconocido",
-          phone: contacts[0].tel?.[0] || "",
-          relation: "Contacto de emergencia",
-          isEmergency: true,
-        };
-        
-        saveContact(contact);
-        options.onContactSelected?.(contact);
-        return contact;
+      if (nativeCapabilitiesRef.current.canReadContacts) {
+        const status =
+          permissionStatus === "granted"
+            ? permissionStatus
+            : await requestNativeContactsPermission();
+
+        setPermissionStatus(status);
+
+        if (status !== "granted") {
+          const message =
+            status === "denied"
+              ? "Permiso de contactos denegado."
+              : "No se pudo acceder a los contactos del dispositivo.";
+          setError(message);
+          optionsRef.current.onError?.(message);
+          return null;
+        }
+
+        const nativeContact = await pickNativeContact();
+        const selectedContact = toContact(
+          {
+            id: nativeContact?.id,
+            name: nativeContact?.name,
+            phone: nativeContact?.phone,
+            relation: nativeContact?.relation || "Contacto de emergencia",
+          },
+          "Contacto de emergencia",
+        );
+
+        if (!selectedContact) {
+          return null;
+        }
+
+        return saveContact(selectedContact);
       }
-      
-      return null;
+
+      if (!browserContactPickerSupportedRef.current) {
+        const message =
+          "Este dispositivo no permite leer contactos directamente. Usa ingreso manual.";
+        setError(message);
+        optionsRef.current.onError?.(message);
+        return null;
+      }
+
+      const nav = navigator as ContactPickerNavigator;
+      const selected = await nav.contacts?.select?.(["name", "tel"], {
+        multiple: false,
+        hint: "Selecciona un contacto de emergencia",
+      });
+
+      const picked = selected?.[0];
+      const selectedContact = toContact(
+        {
+          name: picked?.name?.[0]?.trim(),
+          phone: picked?.tel?.[0] || "",
+          relation: "Contacto de emergencia",
+        },
+        "Contacto de emergencia",
+      );
+
+      if (!selectedContact) {
+        return null;
+      }
+
+      return saveContact(selectedContact);
     } catch (err: any) {
-      if (err.name === "AbortError") return null;
-      const msg = `Error al acceder a contactos: ${err.message}`;
-      setError(msg);
-      options.onError?.(msg);
+      if (err?.name === "AbortError") {
+        return null;
+      }
+
+      const message = `Error al acceder a contactos: ${err?.message || "desconocido"}`;
+      setError(message);
+      optionsRef.current.onError?.(message);
       return null;
     } finally {
       setIsLoading(false);
     }
-  }, [isSupported, saveContact, options]);
+  }, [permissionStatus, saveContact]);
 
-  // Initiate call using tel: protocol
-  const callContact = useCallback((phone: string) => {
-    if (!phone) return;
-    const cleanPhone = phone.replace(/[^\d+]/g, "");
-    window.location.href = `tel:${cleanPhone}`;
-  }, []);
+  const callContact = useCallback(
+    async (phone: string, name?: string) => {
+      const cleanedPhone = normalizePhone(phone);
+      if (!cleanedPhone) {
+        return false;
+      }
 
-  // Remove saved contact
-  const removeSavedContact = useCallback((id: string) => {
-    const updated = savedContacts.filter(c => c.id !== id);
-    setSavedContacts(updated);
-    try {
-      localStorage.setItem("sos-contacts", JSON.stringify(updated));
-    } catch (err) {
-      console.warn("Error removing contact:", err);
-    }
-  }, [savedContacts]);
+      if (nativeCapabilitiesRef.current.canPlaceCalls) {
+        const didCall = await placeNativeCall(cleanedPhone, {
+          autoDial: true,
+          name,
+        });
+
+        if (didCall) {
+          return true;
+        }
+      }
+
+      window.location.assign(`tel:${cleanedPhone}`);
+      return true;
+    },
+    [],
+  );
+
+  const removeSavedContact = useCallback(
+    (id: string) => {
+      saveContacts((previous) => previous.filter((contact) => contact.id !== id));
+    },
+    [saveContacts],
+  );
 
   return {
     isSupported,
     isLoading,
     error,
     savedContacts,
+    deviceContacts,
+    permissionStatus,
+    isNativeBridgeAvailable: nativeCapabilitiesRef.current.isNativeBridgeAvailable,
+    canAutoDial: nativeCapabilitiesRef.current.canAutoDial,
+    canListDeviceContacts: nativeCapabilitiesRef.current.canReadContacts,
+    clearError,
+    saveContact,
+    requestContactsAccess,
+    refreshDeviceContacts,
     parseContactName,
+    findContactByName,
     pickContact,
     callContact,
     removeSavedContact,
