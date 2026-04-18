@@ -50,7 +50,6 @@ const normalizeText = (value: string): string =>
 
 const mergeContacts = (...groups: Contact[][]): Contact[] => {
   const byPhone = new Map<string, Contact>();
-
   for (const group of groups) {
     for (const contact of group) {
       const key = contact.phone.replace(/[^\d+]/g, "") || contact.id;
@@ -60,7 +59,6 @@ const mergeContacts = (...groups: Contact[][]): Contact[] => {
       });
     }
   }
-
   return Array.from(byPhone.values()).sort((left, right) => {
     if (left.isEmergency && !right.isEmergency) return -1;
     if (!left.isEmergency && right.isEmergency) return 1;
@@ -82,7 +80,6 @@ const parseVoiceIntent = (
 ): VoiceIntent => {
   const normalized = normalizeText(transcript);
   const contactName = parseContactName(transcript) || undefined;
-
   if (
     /(activar|activa|envia|enviar|lanza|inicia).*(sos|emergencia|alerta)/.test(
       normalized,
@@ -91,7 +88,6 @@ const parseVoiceIntent = (
   ) {
     return { type: "activate_sos" };
   }
-
   if (
     /(cancela|cancelar|deten|detener|para|parar).*(sos|emergencia|alerta)?/.test(
       normalized,
@@ -99,7 +95,6 @@ const parseVoiceIntent = (
   ) {
     return { type: "cancel_sos" };
   }
-
   if (
     /(llama|llamar|marca|marcar|contacta|contactar|comunicate|comunicar)/.test(
       normalized,
@@ -108,7 +103,6 @@ const parseVoiceIntent = (
   ) {
     return { type: "call", contactName };
   }
-
   if (
     /(busca|buscar|buscame|encuentra|encontrar|muestrame|mostrar)\b/.test(
       normalized,
@@ -116,7 +110,6 @@ const parseVoiceIntent = (
   ) {
     return { type: "search_contact", contactName };
   }
-
   if (
     /(agrega|agregar|anade|añade|guarda|guardar|sincroniza|sincronizar)\b/.test(
       normalized,
@@ -124,7 +117,6 @@ const parseVoiceIntent = (
   ) {
     return { type: "add_contact", contactName };
   }
-
   return { type: "unknown" };
 };
 
@@ -139,6 +131,7 @@ export function SOSView() {
   const [isListening, setIsListening] = useState(false);
   const [isProcessingVoice, setIsProcessingVoice] = useState(false);
 
+  // Refs para evitar stale closures en callbacks asíncronos (Patrón CameraView)
   const isSpeakingRef = useRef(false);
   const isListeningRef = useRef(false);
   const isProcessingVoiceRef = useRef(false);
@@ -150,14 +143,13 @@ export function SOSView() {
   >(null);
   const startVoiceListeningRef = useRef<(() => Promise<void>) | null>(null);
 
+  // Sincronizar refs con estados
   useEffect(() => {
     isListeningRef.current = isListening;
   }, [isListening]);
-
   useEffect(() => {
     isProcessingVoiceRef.current = isProcessingVoice;
   }, [isProcessingVoice]);
-
   useEffect(() => {
     sosActiveRef.current = sosActive;
   }, [sosActive]);
@@ -181,12 +173,12 @@ export function SOSView() {
     pickContact,
     callContact: triggerCall,
   } = useContactPicker({
-    onError: (message) => {
-      setVoiceStatus(message);
-    },
+    onError: (message) => setVoiceStatus(message),
   });
 
   const {
+    isListening: audioListening,
+    isSpeaking: audioSpeaking,
     error: audioError,
     audioLevel,
     startListening: startAudioListening,
@@ -203,12 +195,11 @@ export function SOSView() {
     savedContacts,
     deviceContacts,
   );
-
   useEffect(() => {
     contactsRef.current = contacts;
   }, [contacts]);
 
-  // speakStatus - patron identico a CameraView
+  // speakStatus - patrón idéntico a CameraView
   const speakStatus = useCallback(
     async (text: string) => {
       window.speechSynthesis.cancel();
@@ -429,7 +420,6 @@ export function SOSView() {
     ],
   );
 
-  // Voice activation - mismo patron que CameraView con refs para evitar stale closures
   const {
     isBackgroundListening,
     isActive: voiceActive,
@@ -479,7 +469,6 @@ export function SOSView() {
         console.warn("Voice command already in progress, ignoring request");
         return;
       }
-
       isProcessingVoiceRef.current = true;
       setIsProcessingVoice(true);
       setIsListening(false);
@@ -508,6 +497,7 @@ export function SOSView() {
     [handleVoiceCommand, resetActive, speakStatus, stopAudioListening],
   );
 
+  // Ref assignments para callbacks seguros
   useEffect(() => {
     executeVoiceCommandRef.current = executeVoiceCommand;
   }, [executeVoiceCommand]);
@@ -528,7 +518,11 @@ export function SOSView() {
 
   // Iniciar escucha en background al montar
   useEffect(() => {
-    startBackgroundListening();
+    // Pequeño delay para asegurar inicialización correcta
+    setTimeout(() => startBackgroundListening(), 500);
+    return () => {
+      window.speechSynthesis.cancel();
+    };
   }, []);
 
   // Sincronizar contactos cuando hay permiso
@@ -794,11 +788,7 @@ export function SOSView() {
 
         <div className="mx-5 mb-4 flex gap-2">
           <div
-            className={`flex flex-1 items-center gap-2 rounded-2xl border p-3 transition-colors ${
-              locationShared
-                ? "border-emerald-200 bg-emerald-50"
-                : "border-gray-100 bg-white"
-            }`}
+            className={`flex flex-1 items-center gap-2 rounded-2xl border p-3 transition-colors ${locationShared ? "border-emerald-200 bg-emerald-50" : "border-gray-100 bg-white"}`}
           >
             <MapPin
               size={16}
@@ -807,9 +797,7 @@ export function SOSView() {
             <div>
               <p
                 style={{ fontSize: "10px" }}
-                className={`font-medium uppercase tracking-wide ${
-                  locationShared ? "text-emerald-700" : "text-gray-400"
-                }`}
+                className={`font-medium uppercase tracking-wide ${locationShared ? "text-emerald-700" : "text-gray-400"}`}
               >
                 Ubicacion
               </p>
@@ -824,11 +812,7 @@ export function SOSView() {
             </div>
           </div>
           <div
-            className={`flex flex-1 items-center gap-2 rounded-2xl border p-3 transition-colors ${
-              messageSent
-                ? "border-emerald-200 bg-emerald-50"
-                : "border-gray-100 bg-white"
-            }`}
+            className={`flex flex-1 items-center gap-2 rounded-2xl border p-3 transition-colors ${messageSent ? "border-emerald-200 bg-emerald-50" : "border-gray-100 bg-white"}`}
           >
             <MessageSquare
               size={16}
@@ -837,9 +821,7 @@ export function SOSView() {
             <div>
               <p
                 style={{ fontSize: "10px" }}
-                className={`font-medium uppercase tracking-wide ${
-                  messageSent ? "text-emerald-700" : "text-gray-400"
-                }`}
+                className={`font-medium uppercase tracking-wide ${messageSent ? "text-emerald-700" : "text-gray-400"}`}
               >
                 Mensaje
               </p>
@@ -929,7 +911,6 @@ export function SOSView() {
                   : "Contactos de emergencia"}
               </p>
             </div>
-
             <div className="flex items-center gap-2">
               {permissionStatus === "granted" && canListDeviceContacts && (
                 <button
@@ -962,20 +943,14 @@ export function SOSView() {
                 key={contact.id}
                 initial={{ opacity: 0, x: -10 }}
                 animate={{ opacity: 1, x: 0 }}
-                className={`flex items-center gap-3 rounded-2xl border bg-white px-4 py-3 shadow-sm ${
-                  contact.isEmergency ? "border-red-100" : "border-gray-100"
-                }`}
+                className={`flex items-center gap-3 rounded-2xl border bg-white px-4 py-3 shadow-sm ${contact.isEmergency ? "border-red-100" : "border-gray-100"}`}
               >
                 <div
-                  className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${
-                    contact.isEmergency ? "bg-red-100" : "bg-slate-100"
-                  }`}
+                  className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${contact.isEmergency ? "bg-red-100" : "bg-slate-100"}`}
                 >
                   <span
                     style={{ fontSize: "12px" }}
-                    className={`font-bold ${
-                      contact.isEmergency ? "text-red-600" : "text-slate-600"
-                    }`}
+                    className={`font-bold ${contact.isEmergency ? "text-red-600" : "text-slate-600"}`}
                   >
                     {contact.initials || getInitials(contact.name)}
                   </span>
@@ -995,11 +970,7 @@ export function SOSView() {
                   type="button"
                   aria-label={`Llamar a ${contact.name}`}
                   onClick={() => void callContact(contact.phone, contact.name)}
-                  className={`flex h-8 w-8 items-center justify-center rounded-full transition-colors ${
-                    contact.isEmergency
-                      ? "bg-red-500 active:bg-red-600"
-                      : "bg-slate-900 active:bg-slate-700"
-                  }`}
+                  className={`flex h-8 w-8 items-center justify-center rounded-full transition-colors ${contact.isEmergency ? "bg-red-500 active:bg-red-600" : "bg-slate-900 active:bg-slate-700"}`}
                 >
                   <Phone size={14} className="text-white" />
                 </button>
@@ -1133,7 +1104,6 @@ export function SOSView() {
           </div>
         )}
       </div>
-
       <TopNav />
     </>
   );
