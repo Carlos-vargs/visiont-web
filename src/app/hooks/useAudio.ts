@@ -94,7 +94,6 @@ export function useAudio(options: AudioOptions = {}) {
   const audioContextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const audioWorkletNodeRef = useRef<AudioWorkletNode | null>(null);
-  const monitorGainNodeRef = useRef<GainNode | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const playbackQueueRef = useRef<AudioBuffer[]>([]);
   const playbackContextRef = useRef<AudioContext | null>(null);
@@ -108,33 +107,6 @@ export function useAudio(options: AudioOptions = {}) {
       workletBlobUrlRef.current = null;
     }
   }, []);
-
-  const teardownListening = useCallback(() => {
-    if (audioWorkletNodeRef.current) {
-      audioWorkletNodeRef.current.port.postMessage({ type: "stop" });
-      audioWorkletNodeRef.current.disconnect();
-      audioWorkletNodeRef.current = null;
-    }
-
-    if (monitorGainNodeRef.current) {
-      monitorGainNodeRef.current.disconnect();
-      monitorGainNodeRef.current = null;
-    }
-
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
-
-    if (audioContextRef.current) {
-      void audioContextRef.current.close();
-      audioContextRef.current = null;
-    }
-
-    cleanupWorkletUrl();
-    setIsListening(false);
-    setAudioLevel(0);
-  }, [cleanupWorkletUrl]);
 
   const loadWorkletModule = useCallback(
     async (context: AudioContext): Promise<string> => {
@@ -173,15 +145,33 @@ export function useAudio(options: AudioOptions = {}) {
     [chunkSize],
   );
 
+  const stopListening = useCallback(() => {
+    if (audioWorkletNodeRef.current) {
+      audioWorkletNodeRef.current.port.postMessage({ type: "stop" });
+      audioWorkletNodeRef.current.disconnect();
+      audioWorkletNodeRef.current = null;
+    }
+
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+
+    if (audioContextRef.current) {
+      void audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+
+    cleanupWorkletUrl();
+    setIsListening(false);
+    setAudioLevel(0);
+  }, [cleanupWorkletUrl]);
+
   const startListening = useCallback(
     async (onAudioChunk?: (chunkBase64: string) => void) => {
       try {
         setError(null);
         onAudioChunkRef.current = onAudioChunk || null;
-
-        if (audioContextRef.current || streamRef.current || audioWorkletNodeRef.current) {
-          teardownListening();
-        }
 
         const audioContext = new AudioContext({ sampleRate: sendSampleRate });
         audioContextRef.current = audioContext;
@@ -195,10 +185,6 @@ export function useAudio(options: AudioOptions = {}) {
           },
         });
         streamRef.current = stream;
-
-        if (audioContext.state === "suspended") {
-          await audioContext.resume();
-        }
 
         const source = audioContext.createMediaStreamSource(stream);
         const analyser = audioContext.createAnalyser();
@@ -232,39 +218,39 @@ export function useAudio(options: AudioOptions = {}) {
         };
 
         source.connect(workletNode);
-
-        // Enviamos la señal a un gain en cero para mantener vivo el worklet sin
-        // reproducir el micrófono y provocar eco o realimentación.
-        const monitorGainNode = audioContext.createGain();
-        monitorGainNode.gain.value = 0;
-        monitorGainNodeRef.current = monitorGainNode;
-        workletNode.connect(monitorGainNode);
-        monitorGainNode.connect(audioContext.destination);
+        workletNode.connect(audioContext.destination);
 
         setIsListening(true);
         setPermissionGranted(true);
       } catch (err: any) {
         const message =
           err?.name === "NotAllowedError"
-            ? "Permiso de micrófono denegado. Habilita el acceso en la configuración del navegador."
-            : `Error al acceder al micrófono: ${err?.message || "desconocido"}`;
+            ? "Permiso de microfono denegado. Habilita el acceso en la configuracion del navegador."
+            : `Error al acceder al microfono: ${err?.message || "desconocido"}`;
 
         setError(message);
-        teardownListening();
+        setIsListening(false);
+        cleanupWorkletUrl();
+
+        if (audioContextRef.current) {
+          void audioContextRef.current.close();
+          audioContextRef.current = null;
+        }
+
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach((track) => track.stop());
+          streamRef.current = null;
+        }
       }
     },
     [
       chunkSize,
+      cleanupWorkletUrl,
       enableEchoCancellation,
       loadWorkletModule,
       sendSampleRate,
-      teardownListening,
     ],
   );
-
-  const stopListening = useCallback(() => {
-    teardownListening();
-  }, [teardownListening]);
 
   const processPlaybackQueue = useCallback(async (audioContext: AudioContext) => {
     while (playbackQueueRef.current.length > 0) {
@@ -315,11 +301,6 @@ export function useAudio(options: AudioOptions = {}) {
         }
 
         const audioContext = playbackContextRef.current;
-
-        if (audioContext.state === "suspended") {
-          await audioContext.resume();
-        }
-
         const audioBuffer = audioContext.createBuffer(
           1,
           float32Array.length,
@@ -350,7 +331,6 @@ export function useAudio(options: AudioOptions = {}) {
 
         const response = await fetch(`data:${mimeType};base64,${audioBase64}`);
         const arrayBuffer = await response.arrayBuffer();
-
         const audioContext = new AudioContext();
         const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
         const source = audioContext.createBufferSource();
@@ -387,6 +367,13 @@ export function useAudio(options: AudioOptions = {}) {
       utterance.rate = 1;
       utterance.pitch = 1;
 
+      await new Promise<void>((resolve) => {
+        if (window.speechSynthesis.onvoiceschanged !== undefined) {
+          window.speechSynthesis.onvoiceschanged = () => resolve();
+        }
+        resolve();
+      });
+
       const voices = window.speechSynthesis.getVoices();
       const spanishVoice = voices.find(
         (voice) => voice.lang.startsWith("es") || voice.lang.includes("Spanish"),
@@ -399,7 +386,6 @@ export function useAudio(options: AudioOptions = {}) {
       await new Promise<void>((resolve) => {
         utterance.onend = () => resolve();
         utterance.onerror = () => resolve();
-        window.speechSynthesis.cancel();
         window.speechSynthesis.speak(utterance);
       });
     } catch (err: any) {
@@ -411,7 +397,6 @@ export function useAudio(options: AudioOptions = {}) {
 
   const requestMicrophonePermission = useCallback(async () => {
     try {
-      setError(null);
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       stream.getTracks().forEach((track) => track.stop());
       setPermissionGranted(true);
@@ -424,7 +409,7 @@ export function useAudio(options: AudioOptions = {}) {
 
   useEffect(() => {
     return () => {
-      teardownListening();
+      stopListening();
 
       if (
         playbackContextRef.current &&
@@ -437,7 +422,7 @@ export function useAudio(options: AudioOptions = {}) {
       playbackQueueRef.current = [];
       isPlayingRef.current = false;
     };
-  }, [teardownListening]);
+  }, [stopListening]);
 
   return {
     isListening,
