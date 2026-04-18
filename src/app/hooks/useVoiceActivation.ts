@@ -1,8 +1,4 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import {
-  isLikelyMobileBrowser,
-  isSpeechRecognitionSupported,
-} from "../lib/browserSupport";
 
 type VoiceActivationOptions = {
   wakeWords?: string[];
@@ -76,6 +72,16 @@ const extractCommandAfterWakeWord = (
   return null;
 };
 
+const isSpeechRecognitionSupported = (): boolean => {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  return Boolean(
+    (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition,
+  );
+};
+
 export function useVoiceActivation(options: VoiceActivationOptions = {}) {
   const [isBackgroundListening, setIsBackgroundListening] = useState(false);
   const [isActive, setIsActive] = useState(false);
@@ -102,7 +108,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     wakeWords: DEFAULT_WAKE_WORDS,
     silenceTimeout: DEFAULT_SILENCE_TIMEOUT,
     language: DEFAULT_LANGUAGE,
-    continuous: !isLikelyMobileBrowser(),
+    continuous: true,
     onActivation: () => {},
     onSilence: async () => {},
   });
@@ -112,7 +118,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
       wakeWords: options.wakeWords ?? DEFAULT_WAKE_WORDS,
       silenceTimeout: options.silenceTimeout ?? DEFAULT_SILENCE_TIMEOUT,
       language: options.language ?? DEFAULT_LANGUAGE,
-      continuous: options.continuous ?? !isLikelyMobileBrowser(),
+      continuous: options.continuous ?? true,
       onActivation: options.onActivation ?? (() => {}),
       onSilence: options.onSilence ?? (async () => {}),
     };

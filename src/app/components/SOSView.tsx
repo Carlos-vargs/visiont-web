@@ -17,7 +17,6 @@ import {
 } from "lucide-react";
 import { useVoiceActivation } from "../hooks/useVoiceActivation";
 import { useContactPicker, type Contact } from "../hooks/useContactPicker";
-import { isLikelyMobileBrowser } from "../lib/browserSupport";
 
 const initialContacts: Contact[] = [
   {
@@ -268,22 +267,12 @@ export function SOSView() {
       await handleVoiceCommand(transcript);
     },
   });
-  const shouldAutoStartVoice = !isLikelyMobileBrowser();
-
   useEffect(() => {
     let isMounted = true;
 
     const enableBackgroundListeningIfPossible = async () => {
-      if (!shouldAutoStartVoice) {
-        setVoiceStatus("Toca el microfono para habilitar comandos de voz");
-        return;
-      }
-
       try {
         if (!navigator.permissions?.query) {
-          if (isMounted) {
-            setVoiceStatus("Toca el micrófono para habilitar comandos de voz");
-          }
           return;
         }
 
@@ -298,13 +287,10 @@ export function SOSView() {
         if (permission.state === "granted") {
           startBackgroundListening();
           setVoiceStatus("");
-        } else {
-          setVoiceStatus("Toca el micrófono para habilitar comandos de voz");
         }
       } catch {
-        if (isMounted) {
-          setVoiceStatus("Toca el micrófono para habilitar comandos de voz");
-        }
+        // En algunos navegadores la Permissions API falla aunque el microfono
+        // funcione al tocar el boton. No mostramos un aviso pasivo aqui.
       }
     };
 
@@ -314,7 +300,7 @@ export function SOSView() {
       isMounted = false;
       stopBackgroundListening();
     };
-  }, [shouldAutoStartVoice, startBackgroundListening, stopBackgroundListening]);
+  }, [startBackgroundListening, stopBackgroundListening]);
 
   useEffect(() => {
     if (
