@@ -14,18 +14,8 @@ type SubmitOptions = {
   allowEmpty?: boolean;
 };
 
-const DEFAULT_WAKE_WORDS = [
-  "analiza",
-  "quiero que",
-  "ok visiont",
-  "visont",
-  "analizando",
-];
-
-const DEFAULT_LANGUAGE = "es-ES";
-const DEFAULT_SILENCE_TIMEOUT = 2000;
-const RESTART_DELAY_MS = 400;
-const IGNORE_RESULTS_DELAY_MS = 1000;
+const RESTART_DELAY_MS = 450;
+const IGNORE_RESULTS_DELAY_MS = 1200;
 const DUPLICATE_WAKE_WORD_WINDOW_MS = 1500;
 
 const normalizeText = (value: string): string =>
@@ -69,6 +59,12 @@ const extractCommandAfterWakeWord = (
 };
 
 export function useVoiceActivation(options: VoiceActivationOptions = {}) {
+  const {
+    wakeWords = ["analiza", "quiero que", "ok visiont", "visont", "analizando"],
+    silenceTimeout = 2000,
+    language = "es-ES",
+  } = options;
+
   const [isBackgroundListening, setIsBackgroundListening] = useState(false);
   const [isActive, setIsActive] = useState(false);
   const [isManualListening, setIsManualListening] = useState(false);
@@ -77,33 +73,21 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
   const [transcript, setTranscript] = useState("");
 
   const recognitionRef = useRef<any>(null);
-  const recognitionStatusRef = useRef<RecognitionStatus>("idle");
-  const shouldKeepRecognitionAliveRef = useRef(false);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const shouldKeepRecognitionAliveRef = useRef(false);
+  const recognitionStatusRef = useRef<RecognitionStatus>("idle");
   const isActiveRef = useRef(false);
-  const modeRef = useRef<RecognitionMode>("idle");
   const transcriptPartsRef = useRef<string[]>([]);
   const transcriptSetRef = useRef<Set<string>>(new Set());
   const interimTranscriptRef = useRef("");
   const ignoreResultsUntilRef = useRef(0);
+  const optionsRef = useRef(options);
+  const modeRef = useRef<RecognitionMode>("idle");
   const lastWakeActivationRef = useRef({ text: "", at: 0 });
-  const optionsRef = useRef<Required<VoiceActivationOptions>>({
-    wakeWords: DEFAULT_WAKE_WORDS,
-    silenceTimeout: DEFAULT_SILENCE_TIMEOUT,
-    language: DEFAULT_LANGUAGE,
-    onActivation: () => {},
-    onSilence: async () => {},
-  });
 
   useEffect(() => {
-    optionsRef.current = {
-      wakeWords: options.wakeWords ?? DEFAULT_WAKE_WORDS,
-      silenceTimeout: options.silenceTimeout ?? DEFAULT_SILENCE_TIMEOUT,
-      language: options.language ?? DEFAULT_LANGUAGE,
-      onActivation: options.onActivation ?? (() => {}),
-      onSilence: options.onSilence ?? (async () => {}),
-    };
+    optionsRef.current = options;
   }, [options]);
 
   const clearSilenceTimer = useCallback(() => {
@@ -124,6 +108,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     transcriptPartsRef.current = [];
     transcriptSetRef.current = new Set();
     interimTranscriptRef.current = "";
+    setTranscript("");
   }, []);
 
   const updateTranscriptState = useCallback(() => {
@@ -151,7 +136,6 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
       setIsActive(false);
       setIsManualListening(false);
       clearTranscriptBuffers();
-      setTranscript(submittedTranscript);
 
       if (!shouldSubmit || (!submittedTranscript && !allowEmpty)) {
         return;
@@ -159,7 +143,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
 
       try {
         setIsProcessing(true);
-        await optionsRef.current.onSilence(submittedTranscript);
+        await optionsRef.current.onSilence?.(submittedTranscript);
       } finally {
         setIsProcessing(false);
       }
@@ -171,8 +155,8 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     clearSilenceTimer();
     silenceTimerRef.current = setTimeout(() => {
       void completeActiveListening(true);
-    }, optionsRef.current.silenceTimeout);
-  }, [clearSilenceTimer, completeActiveListening]);
+    }, silenceTimeout);
+  }, [clearSilenceTimer, completeActiveListening, silenceTimeout]);
 
   const activateListening = useCallback(
     (mode: Exclude<RecognitionMode, "idle">, initialTranscript = "") => {
@@ -182,14 +166,16 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
       setIsManualListening(mode === "manual");
       clearTranscriptBuffers();
 
-      const normalizedInitialTranscript = joinTranscript([initialTranscript]);
-      interimTranscriptRef.current = normalizedInitialTranscript;
-      setTranscript(normalizedInitialTranscript);
+      const initial = joinTranscript([initialTranscript]);
+      if (initial) {
+        interimTranscriptRef.current = initial;
+        updateTranscriptState();
+      }
 
-      optionsRef.current.onActivation();
+      optionsRef.current.onActivation?.();
       scheduleSilenceTimeout();
     },
-    [clearTranscriptBuffers, scheduleSilenceTimeout],
+    [clearTranscriptBuffers, scheduleSilenceTimeout, updateTranscriptState],
   );
 
   const handleRecognitionResult = useCallback(
@@ -224,26 +210,26 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
       if (!isActiveRef.current) {
         const commandAfterWakeWord = extractCommandAfterWakeWord(
           latestChunk,
-          optionsRef.current.wakeWords,
+          wakeWords,
         );
 
         if (commandAfterWakeWord === null) {
           return;
         }
 
-        const normalizedChunk = normalizeText(latestChunk);
+        const normalizedLatestChunk = normalizeText(latestChunk);
         const now = Date.now();
 
         if (
-          normalizedChunk &&
-          normalizedChunk === lastWakeActivationRef.current.text &&
+          normalizedLatestChunk &&
+          normalizedLatestChunk === lastWakeActivationRef.current.text &&
           now - lastWakeActivationRef.current.at < DUPLICATE_WAKE_WORD_WINDOW_MS
         ) {
           return;
         }
 
         lastWakeActivationRef.current = {
-          text: normalizedChunk,
+          text: normalizedLatestChunk,
           at: now,
         };
 
@@ -270,7 +256,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
       updateTranscriptState();
       scheduleSilenceTimeout();
     },
-    [activateListening, scheduleSilenceTimeout, updateTranscriptState],
+    [activateListening, scheduleSilenceTimeout, updateTranscriptState, wakeWords],
   );
 
   const createRecognition = useCallback(() => {
@@ -290,6 +276,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     const recognition = new SpeechRecognition();
     recognition.continuous = true;
     recognition.interimResults = true;
+    recognition.lang = language;
     recognition.maxAlternatives = 1;
 
     recognition.onstart = () => {
@@ -300,7 +287,11 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     recognition.onresult = handleRecognitionResult;
 
     recognition.onerror = (event: any) => {
-      if (event.error === "no-speech" || event.error === "aborted") {
+      if (event.error === "no-speech") {
+        return;
+      }
+
+      if (event.error === "aborted") {
         return;
       }
 
@@ -328,35 +319,34 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
         return;
       }
 
-      if (!shouldKeepRecognitionAliveRef.current) {
-        setIsBackgroundListening(false);
+      if (shouldKeepRecognitionAliveRef.current) {
+        clearRestartTimer();
+        restartTimerRef.current = setTimeout(() => {
+          if (!shouldKeepRecognitionAliveRef.current) {
+            return;
+          }
+
+          if (recognitionStatusRef.current !== "idle") {
+            return;
+          }
+
+          try {
+            recognitionStatusRef.current = "starting";
+            recognition.start();
+          } catch (restartError) {
+            recognitionStatusRef.current = "idle";
+            console.warn("No se pudo reiniciar el reconocimiento:", restartError);
+          }
+        }, RESTART_DELAY_MS);
         return;
       }
 
-      clearRestartTimer();
-      restartTimerRef.current = setTimeout(() => {
-        if (!shouldKeepRecognitionAliveRef.current) {
-          return;
-        }
-
-        if (recognitionStatusRef.current !== "idle") {
-          return;
-        }
-
-        try {
-          recognition.lang = optionsRef.current.language;
-          recognitionStatusRef.current = "starting";
-          recognition.start();
-        } catch (restartError) {
-          recognitionStatusRef.current = "idle";
-          console.warn("No se pudo reiniciar el reconocimiento:", restartError);
-        }
-      }, RESTART_DELAY_MS);
+      setIsBackgroundListening(false);
     };
 
     recognitionRef.current = recognition;
     return recognition;
-  }, [clearRestartTimer, handleRecognitionResult]);
+  }, [clearRestartTimer, handleRecognitionResult, language]);
 
   const ensureRecognitionStarted = useCallback(() => {
     const recognition = createRecognition();
@@ -374,7 +364,6 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     clearRestartTimer();
 
     try {
-      recognition.lang = optionsRef.current.language;
       recognitionStatusRef.current = "starting";
       recognition.start();
     } catch (startError) {
@@ -394,19 +383,16 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     clearRestartTimer();
     void completeActiveListening(false);
 
-    if (!recognitionRef.current) {
+    if (recognitionRef.current) {
+      recognitionStatusRef.current = "stopping";
+      try {
+        recognitionRef.current.stop();
+      } catch (stopError) {
+        recognitionStatusRef.current = "idle";
+        console.warn("No se pudo detener el reconocimiento:", stopError);
+      }
+    } else {
       setIsBackgroundListening(false);
-      return;
-    }
-
-    recognitionStatusRef.current = "stopping";
-
-    try {
-      recognitionRef.current.stop();
-    } catch (stopError) {
-      recognitionStatusRef.current = "idle";
-      setIsBackgroundListening(false);
-      console.warn("No se pudo detener el reconocimiento:", stopError);
     }
   }, [clearRestartTimer, completeActiveListening]);
 
@@ -429,14 +415,8 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
   }, [completeActiveListening]);
 
   const resetActive = useCallback(() => {
-    clearSilenceTimer();
-    isActiveRef.current = false;
-    modeRef.current = "idle";
-    setIsActive(false);
-    setIsManualListening(false);
-    clearTranscriptBuffers();
-    setTranscript("");
-  }, [clearSilenceTimer, clearTranscriptBuffers]);
+    cancelActiveListening();
+  }, [cancelActiveListening]);
 
   useEffect(() => {
     return () => {
@@ -449,10 +429,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
         try {
           recognitionRef.current.stop();
         } catch (stopError) {
-          console.warn(
-            "No se pudo detener el reconocimiento al desmontar:",
-            stopError,
-          );
+          console.warn("No se pudo detener el reconocimiento al desmontar:", stopError);
         }
       }
     };
