@@ -17,7 +17,6 @@ import {
 } from "lucide-react";
 import { useVoiceActivation } from "../hooks/useVoiceActivation";
 import { useContactPicker, type Contact } from "../hooks/useContactPicker";
-import { isLikelyMobileBrowser } from "../lib/browserSupport";
 
 const initialContacts: Contact[] = [
   {
@@ -268,17 +267,11 @@ export function SOSView() {
       await handleVoiceCommand(transcript);
     },
   });
-  const shouldAutoStartVoice = !isLikelyMobileBrowser();
 
   useEffect(() => {
     let isMounted = true;
 
     const enableBackgroundListeningIfPossible = async () => {
-      if (!shouldAutoStartVoice) {
-        setVoiceStatus("Toca el microfono para habilitar comandos de voz");
-        return;
-      }
-
       try {
         if (!navigator.permissions?.query) {
           if (isMounted) {
@@ -314,7 +307,7 @@ export function SOSView() {
       isMounted = false;
       stopBackgroundListening();
     };
-  }, [shouldAutoStartVoice, startBackgroundListening, stopBackgroundListening]);
+  }, [startBackgroundListening, stopBackgroundListening]);
 
   useEffect(() => {
     if (
@@ -342,6 +335,17 @@ export function SOSView() {
       setVoiceStatus(voiceError);
     }
   }, [voiceError]);
+
+  const requestMicrophonePermission = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach((track) => track.stop());
+      return true;
+    } catch {
+      setVoiceStatus("Permite el micrófono para usar comandos de voz");
+      return false;
+    }
+  }, []);
 
   const cancelSOS = useCallback(() => {
     setSosActive(false);
@@ -554,17 +558,17 @@ export function SOSView() {
       return;
     }
 
+    const granted = await requestMicrophonePermission();
+    if (!granted) {
+      return;
+    }
+
     setShowManualInput(false);
     setVoiceStatus("Habla ahora...");
-    const started = startManualListening();
-
-    if (!started) {
-      setVoiceStatus(
-        "No pude activar el reconocimiento de voz. Revisa permisos del microfono.",
-      );
-    }
+    startManualListening();
   }, [
     clearContactPickerError,
+    requestMicrophonePermission,
     startManualListening,
     submitActiveListening,
     voiceActive,
