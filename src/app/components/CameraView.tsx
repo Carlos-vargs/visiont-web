@@ -6,7 +6,6 @@ import { useCamera } from "../hooks/useCamera";
 import { useAudio } from "../hooks/useAudio";
 import { useGemini } from "../hooks/useGemini";
 import { useVoiceActivation } from "../hooks/useVoiceActivation";
-import { isLikelyMobileBrowser } from "../lib/browserSupport";
 
 type BoundingBox = {
   id: number;
@@ -18,6 +17,8 @@ type BoundingBox = {
   h: number;
   confidence: number;
 };
+
+const isDevelopment = import.meta.env.VITE_ENVIRONMENT !== "production";
 
 export function CameraView() {
   const [activeBoxes, setActiveBoxes] = useState<BoundingBox[]>([]);
@@ -67,13 +68,13 @@ export function CameraView() {
     isSpeaking: audioSpeaking,
     error: audioError,
     speakText,
+    requestMicrophonePermission,
   } = useAudio({
     sendSampleRate: 16000,
     enableEchoCancellation: true,
   });
 
   const { error: geminiError, sendImageWithPrompt } = useGemini();
-  const shouldAutoStartVoice = voiceActivationEnabled && !isLikelyMobileBrowser();
 
   const {
     isBackgroundListening,
@@ -109,12 +110,6 @@ export function CameraView() {
       console.log("[Voice Transcript]", userTranscript);
     }
   }, [userTranscript]);
-
-  useEffect(() => {
-    if (voiceError) {
-      setIsListening(false);
-    }
-  }, [voiceError]);
 
   useEffect(() => {
     let progress = 0;
@@ -236,7 +231,7 @@ export function CameraView() {
   useEffect(() => {
     startCamera();
 
-    if (shouldAutoStartVoice) {
+    if (voiceActivationEnabled) {
       const timer = setTimeout(() => {
         startBackgroundListening();
       }, 1000);
@@ -255,11 +250,11 @@ export function CameraView() {
     };
   }, [
     cancelAnalysis,
-    shouldAutoStartVoice,
     startBackgroundListening,
     startCamera,
     stopBackgroundListening,
     stopCamera,
+    voiceActivationEnabled,
   ]);
 
   const handleMicPress = useCallback(async () => {
@@ -273,16 +268,18 @@ export function CameraView() {
       return;
     }
 
-    setIsListening(true);
-    const started = startManualListening();
-
-    if (!started) {
-      setIsListening(false);
+    const granted = await requestMicrophonePermission();
+    if (!granted) {
+      return;
     }
+
+    setIsListening(true);
+    startManualListening();
   }, [
     cancelAnalysis,
     isAnalyzing,
     isListening,
+    requestMicrophonePermission,
     startManualListening,
     submitActiveListening,
     voiceActive,
@@ -363,7 +360,8 @@ export function CameraView() {
             </div>
           )}
 
-          {transcriptToShow &&
+          {isDevelopment &&
+            transcriptToShow &&
             (isListening || voiceProcessing || voiceActive) && (
               <div
                 className="absolute left-4 bottom-4 z-50 rounded-xl bg-black/60 px-4 py-2 text-white shadow-lg"

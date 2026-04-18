@@ -1,14 +1,9 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import {
-  isLikelyMobileBrowser,
-  isSpeechRecognitionSupported,
-} from "../lib/browserSupport";
 
 type VoiceActivationOptions = {
   wakeWords?: string[];
   silenceTimeout?: number;
   language?: string;
-  continuous?: boolean;
   onActivation?: () => void;
   onSilence?: (transcript: string) => void | Promise<void>;
 };
@@ -102,7 +97,6 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     wakeWords: DEFAULT_WAKE_WORDS,
     silenceTimeout: DEFAULT_SILENCE_TIMEOUT,
     language: DEFAULT_LANGUAGE,
-    continuous: !isLikelyMobileBrowser(),
     onActivation: () => {},
     onSilence: async () => {},
   });
@@ -112,7 +106,6 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
       wakeWords: options.wakeWords ?? DEFAULT_WAKE_WORDS,
       silenceTimeout: options.silenceTimeout ?? DEFAULT_SILENCE_TIMEOUT,
       language: options.language ?? DEFAULT_LANGUAGE,
-      continuous: options.continuous ?? !isLikelyMobileBrowser(),
       onActivation: options.onActivation ?? (() => {}),
       onSilence: options.onSilence ?? (async () => {}),
     };
@@ -317,12 +310,6 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
       return recognitionRef.current;
     }
 
-    if (!window.isSecureContext) {
-      setError("Los comandos de voz requieren HTTPS para usar el microfono.");
-      shouldKeepRecognitionAliveRef.current = false;
-      return null;
-    }
-
     const SpeechRecognition =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
@@ -333,7 +320,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     }
 
     const recognition = new SpeechRecognition();
-    recognition.continuous = optionsRef.current.continuous;
+    recognition.continuous = true;
     recognition.interimResults = true;
     recognition.maxAlternatives = 1;
 
@@ -347,11 +334,6 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     const stopRecognitionAfterTerminalError = () => {
       shouldKeepRecognitionAliveRef.current = false;
       recognitionStatusRef.current = "stopping";
-      isActiveRef.current = false;
-      modeRef.current = "idle";
-      clearSilenceTimer();
-      setIsActive(false);
-      setIsManualListening(false);
       setIsBackgroundListening(false);
 
       try {
@@ -443,9 +425,6 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
           recognition.start();
         } catch (restartError) {
           recognitionStatusRef.current = "idle";
-          shouldKeepRecognitionAliveRef.current = false;
-          setIsBackgroundListening(false);
-          setError("Toca el microfono para volver a activar comandos de voz.");
           console.warn("No se pudo reiniciar el reconocimiento:", restartError);
         }
       }, restartDelay);
@@ -455,7 +434,6 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     return recognition;
   }, [
     clearRestartTimer,
-    clearSilenceTimer,
     getNetworkRetryDelay,
     getRestartDelay,
     handleRecognitionResult,
@@ -464,37 +442,26 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
   const ensureRecognitionStarted = useCallback(() => {
     const recognition = createRecognition();
     if (!recognition) {
-      return false;
+      return;
     }
 
     if (
       recognitionStatusRef.current === "running" ||
-      recognitionStatusRef.current === "starting"
+      recognitionStatusRef.current === "starting" ||
+      recognitionStatusRef.current === "stopping"
     ) {
-      return true;
-    }
-
-    if (recognitionStatusRef.current === "stopping") {
-      return false;
+      return;
     }
 
     clearRestartTimer();
 
     try {
       recognition.lang = optionsRef.current.language;
-      recognition.continuous = optionsRef.current.continuous;
       recognitionStatusRef.current = "starting";
       recognition.start();
-      return true;
     } catch (startError) {
       recognitionStatusRef.current = "idle";
-      setError(
-        startError instanceof DOMException && startError.name === "NotAllowedError"
-          ? "Permiso de microfono denegado. Toca el candado del navegador y habilita el microfono."
-          : "No pude iniciar el reconocimiento de voz. Toca el microfono para reintentar.",
-      );
       console.warn("No se pudo iniciar el reconocimiento:", startError);
-      return false;
     }
   }, [clearRestartTimer, createRecognition]);
 
@@ -502,7 +469,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     setError(null);
     resetNetworkRetryState();
     shouldKeepRecognitionAliveRef.current = true;
-    return ensureRecognitionStarted();
+    ensureRecognitionStarted();
   }, [ensureRecognitionStarted, resetNetworkRetryState]);
 
   const stopBackgroundListening = useCallback(() => {
@@ -530,14 +497,8 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     setError(null);
     resetNetworkRetryState();
     shouldKeepRecognitionAliveRef.current = true;
-    const started = ensureRecognitionStarted();
-
-    if (!started) {
-      return false;
-    }
-
+    ensureRecognitionStarted();
     activateListening("manual");
-    return true;
   }, [activateListening, ensureRecognitionStarted, resetNetworkRetryState]);
 
   const submitActiveListening = useCallback(
@@ -588,7 +549,6 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     isProcessing,
     transcript,
     error,
-    isSupported: isSpeechRecognitionSupported(),
     startBackgroundListening,
     stopBackgroundListening,
     startManualListening,
