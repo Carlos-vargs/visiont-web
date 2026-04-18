@@ -6,7 +6,6 @@ import { useCamera } from "../hooks/useCamera";
 import { useAudio } from "../hooks/useAudio";
 import { useGemini } from "../hooks/useGemini";
 import { useVoiceActivation } from "../hooks/useVoiceActivation";
-import { isLikelyMobileBrowser } from "../lib/browserSupport";
 
 type BoundingBox = {
   id: number;
@@ -73,7 +72,6 @@ export function CameraView() {
   });
 
   const { error: geminiError, sendImageWithPrompt } = useGemini();
-  const shouldAutoStartVoice = voiceActivationEnabled && !isLikelyMobileBrowser();
 
   const {
     isBackgroundListening,
@@ -236,7 +234,7 @@ export function CameraView() {
   useEffect(() => {
     startCamera();
 
-    if (shouldAutoStartVoice) {
+    if (voiceActivationEnabled) {
       const timer = setTimeout(() => {
         startBackgroundListening();
       }, 1000);
@@ -255,11 +253,11 @@ export function CameraView() {
     };
   }, [
     cancelAnalysis,
-    shouldAutoStartVoice,
     startBackgroundListening,
     startCamera,
     stopBackgroundListening,
     stopCamera,
+    voiceActivationEnabled,
   ]);
 
   const handleMicPress = useCallback(async () => {
