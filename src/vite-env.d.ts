@@ -28,3 +28,26 @@ declare var ImageCapture: {
   prototype: ImageCapture;
   new(track: MediaStreamTrack): ImageCapture;
 };
+
+type VisionTNativeBridgeMethod = (payload?: Record<string, unknown>) => unknown;
+
+interface VisionTNativeBridge {
+  placeCall?: VisionTNativeBridgeMethod;
+  pickContact?: VisionTNativeBridgeMethod;
+  listContacts?: VisionTNativeBridgeMethod;
+  requestContactsPermission?: VisionTNativeBridgeMethod;
+  getContactsPermissionStatus?: VisionTNativeBridgeMethod;
+}
+
+interface Window {
+  VisionTNativeBridge?: VisionTNativeBridge;
+  webkit?: {
+    messageHandlers?: {
+      visiontNativeBridge?: {
+        postMessage: (payload: unknown) => void;
+      };
+    };
+  };
+  __visiontNativeBridgeResolve?: (id: string, result?: unknown) => void;
+  __visiontNativeBridgeReject?: (id: string, error?: unknown) => void;
+}
