@@ -43,11 +43,11 @@ export function CameraView() {
   const [isListening, setIsListening] = useState(false);
   const [voiceActivationEnabled] = useState(true);
 
-  const captureTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const captureTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isAnalysisInProgressRef = useRef(false);
 
-  // Stable refs for voice activation callbacks (avoids stale closure captures)
+  // Stable refs for callbacks used inside useVoiceActivation closures
   const executeSingleAnalysisRef = useRef<
     ((transcript?: string) => Promise<void>) | null
   >(null);
@@ -113,12 +113,10 @@ export function CameraView() {
     },
   });
 
-  // ─── Sync refs ────────────────────────────────────────────────────────────────
+  // ─── Debug transcript log ─────────────────────────────────────────────────────
 
   useEffect(() => {
-    if (userTranscript) {
-      console.log("[Voice Transcript]", userTranscript);
-    }
+    if (userTranscript) console.log("[Voice Transcript]", userTranscript);
   }, [userTranscript]);
 
   // ─── Scan line animation ──────────────────────────────────────────────────────
@@ -136,9 +134,7 @@ export function CameraView() {
 
   useEffect(() => {
     startCamera();
-
     if (voiceActivationEnabled) {
-      // Small delay so camera initialization does not compete with mic permission
       const t = setTimeout(() => startBackgroundListening(), 1000);
       return () => {
         clearTimeout(t);
@@ -146,58 +142,41 @@ export function CameraView() {
         cancelAnalysis();
       };
     }
-
     return () => {
       stopCamera();
       cancelAnalysis();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ─── Centralized speech ───────────────────────────────────────────────────────
-
-  /**
-   * Single entry point for all TTS output.
-   *
-   * Before speaking: pauses SpeechRecognition so the microphone cannot pick up
-   * synthesized audio and accidentally re-trigger analysis (feedback loop).
-   * After speaking: resumes recognition with a built-in 350 ms settling delay
-   * (handled inside resumeRecognition) so the OS audio pipeline has time to flush.
-   *
-   * Uses the sequential speech queue from useAudio — calls never overlap.
-   */
-  const speak = useCallback(
-    async (text: string) => {
-      pauseRecognition();
-      await speakText(text);
-      resumeRecognition();
-    },
-    [speakText, pauseRecognition, resumeRecognition],
-  );
-
   // ─── Analysis ────────────────────────────────────────────────────────────────
 
   const executeSingleAnalysis = useCallback(
-    async (userTranscript?: string) => {
+    async (transcript?: string) => {
       if (isAnalysisInProgressRef.current) return;
       isAnalysisInProgressRef.current = true;
 
-      // Stop mic input as soon as analysis begins — the microphone is no longer
-      // needed and keeping it open would capture audio we discard anyway.
+      // Stop mic input — no longer needed during analysis
       stopAudioListening();
       setIsListening(false);
       setIsAnalyzing(true);
 
+      // Pause wake-word recognition for the ENTIRE cycle.
+      // Single pause here, single resume in finally — no per-utterance flickering.
+      pauseRecognition();
+
       abortControllerRef.current = new AbortController();
       const signal = abortControllerRef.current.signal;
 
-      await speak("Analizando");
+      // Fire-and-forget: speak concurrently with the API request.
+      // The speech queue ensures feedback plays AFTER this utterance finishes.
+      speakText("Analizando");
 
       try {
         const frame = captureFrame();
         if (!frame || signal.aborted) return;
 
-        const prompt = userTranscript
-          ? `El usuario dijo: "${userTranscript}". Responde a lo que pide basandote en la imagen. ` +
+        const prompt = transcript
+          ? `El usuario dijo: "${transcript}". Responde a lo que pide basandote en la imagen. ` +
             `Si solicita identificar objetos proporciona maximo 4 con distancias aproximadas. ` +
             `Responde en JSON con 'feedback' y 'detections' (maximo 4 objetos si aplica).`
           : `Describe lo que ves. Identifica maximo 4 objetos principales con distancias aproximadas. ` +
@@ -219,25 +198,30 @@ export function CameraView() {
           }));
         if (boxes.length > 0) setActiveBoxes(boxes);
 
-        // speak() awaits completion before resumeRecognition is called,
-        // so recognition only reopens after the user has heard the full response.
-        if (!signal.aborted) {
-          await speak(result.feedback);
-        }
+        // Enqueued — plays automatically after "Analizando" finishes
+        if (!signal.aborted) speakText(result.feedback);
       } catch (err: any) {
         if (err.name !== "AbortError") {
-          console.error("[executeSingleAnalysis] error:", err);
+          console.error("[executeSingleAnalysis]", err);
         }
       } finally {
         isAnalysisInProgressRef.current = false;
         setIsAnalyzing(false);
         abortControllerRef.current = null;
-        // resetActive clears wake-word state; recognition restart is handled
-        // automatically by the onend handler in useVoiceActivation.
         resetActive();
+        // Single resume — recognition restarts after TTS fully settles (350ms in hook)
+        resumeRecognition();
       }
     },
-    [captureFrame, sendImageWithPrompt, speak, stopAudioListening, resetActive],
+    [
+      captureFrame,
+      sendImageWithPrompt,
+      speakText,
+      stopAudioListening,
+      pauseRecognition,
+      resumeRecognition,
+      resetActive,
+    ],
   );
 
   const cancelAnalysis = useCallback(() => {
@@ -252,7 +236,6 @@ export function CameraView() {
       captureTimeoutRef.current = null;
     }
 
-    // cancelSpeech clears the queue and stops any in-progress utterance cleanly
     cancelSpeech();
 
     isAnalysisInProgressRef.current = false;
@@ -260,28 +243,29 @@ export function CameraView() {
     setIsListening(false);
     resetActive();
 
-    if (hadActivity) {
-      // Fire-and-forget: user is informed but we do not block on it
-      speak("Cancelando");
-    }
-  }, [cancelSpeech, speak, resetActive]);
+    // Ensure recognition resumes even after an aborted cycle
+    resumeRecognition();
 
-  // ─── Assign stable refs for voice activation callbacks ───────────────────────
+    if (hadActivity) speakText("Cancelando");
+  }, [cancelSpeech, speakText, resetActive, resumeRecognition]);
+
+  // ─── Assign stable refs ───────────────────────────────────────────────────────
 
   useEffect(() => {
     executeSingleAnalysisRef.current = executeSingleAnalysis;
   }, [executeSingleAnalysis]);
 
-  // ─── Voice listening (started by wake word) ──────────────────────────────────
+  // ─── Voice listening (wake word activation) ───────────────────────────────────
 
   const startVoiceListening = useCallback(async () => {
     const granted = await requestMicrophonePermission();
     if (!granted) return;
     setIsListening(true);
     startAudioListening();
-    // Inform the user without overriding any in-progress speech
-    speak("Escuchando");
-  }, [requestMicrophonePermission, startAudioListening, speak]);
+    // No pause here — recognition stays running so the user's question is captured.
+    // "Escuchando" is not a wake word so it won't re-trigger activation.
+    speakText("Escuchando");
+  }, [requestMicrophonePermission, startAudioListening, speakText]);
 
   useEffect(() => {
     startVoiceListeningRef.current = startVoiceListening;
@@ -290,10 +274,9 @@ export function CameraView() {
   // ─── Mic button ───────────────────────────────────────────────────────────────
 
   /**
-   * State machine:
-   *   analyzing  -> cancel
-   *   listening  -> stop mic + run analysis immediately (no transcript)
-   *   idle       -> request permission + start listening
+   * analyzing  ->  cancel everything
+   * listening  ->  stop mic, run analysis immediately (no transcript)
+   * idle       ->  request permission, start listening
    */
   const handleMicPress = useCallback(async () => {
     if (isAnalyzing) {
@@ -304,7 +287,7 @@ export function CameraView() {
     if (isListening) {
       stopAudioListening();
       setIsListening(false);
-      await executeSingleAnalysis(); // no transcript — manual trigger
+      await executeSingleAnalysis();
       return;
     }
 
@@ -312,7 +295,7 @@ export function CameraView() {
     if (!granted) return;
     setIsListening(true);
     startAudioListening();
-    speak("Escuchando, tocar para analizar");
+    speakText("Escuchando, tocar para analizar");
   }, [
     isAnalyzing,
     isListening,
@@ -321,14 +304,14 @@ export function CameraView() {
     executeSingleAnalysis,
     requestMicrophonePermission,
     startAudioListening,
-    speak,
+    speakText,
   ]);
 
   // ─── Replay last feedback ─────────────────────────────────────────────────────
 
   const handleSpeakFeedback = useCallback(() => {
-    if (feedbackText) speak(feedbackText);
-  }, [feedbackText, speak]);
+    if (feedbackText) speakText(feedbackText);
+  }, [feedbackText, speakText]);
 
   return (
     <>
