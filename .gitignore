@@ -25,7 +25,6 @@ pnpm-debug.log*
 # Editor settings
 .vscode/
 .idea/
-.agents/
 
 # System files
 .DS_Store
