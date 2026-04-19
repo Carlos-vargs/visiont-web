@@ -8,6 +8,8 @@ type VoiceActivationOptions = {
   onSilence?: (transcript: string) => void;
 };
 
+type RecognitionMode = "background" | "manual";
+
 export function useVoiceActivation(options: VoiceActivationOptions = {}) {
   const {
     wakeWords = ["analiza", "quiero que", "ok visiont", "visont", "analizando"],
@@ -16,6 +18,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
   } = options;
 
   const [isBackgroundListening, setIsBackgroundListening] = useState(false);
+  const [isManualListening, setIsManualListening] = useState(false);
   const [isActive, setIsActive] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -24,6 +27,8 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
   const recognitionRef = useRef<any>(null);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const transcriptBufferRef = useRef<string>("");
+  const latestTranscriptRef = useRef<string>("");
+  const recognitionModeRef = useRef<RecognitionMode | null>(null);
 
   // State flags tracked in refs to avoid stale closures in recognition callbacks
   const isActiveRef = useRef(false);
@@ -52,6 +57,24 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     }
   }, []);
 
+  const resetTranscript = useCallback(() => {
+    transcriptBufferRef.current = "";
+    latestTranscriptRef.current = "";
+    setTranscript("");
+  }, []);
+
+  const appendFinalTranscript = useCallback((value: string) => {
+    const clean = value.trim();
+    if (!clean) return;
+    transcriptBufferRef.current = `${transcriptBufferRef.current} ${clean}`.trim();
+  }, []);
+
+  const updateTranscript = useCallback((interim = "") => {
+    const next = `${transcriptBufferRef.current} ${interim}`.trim();
+    latestTranscriptRef.current = next;
+    setTranscript(next);
+  }, []);
+
   const handleSilenceTimeout = useCallback(() => {
     if (!isActiveRef.current) return;
 
@@ -74,7 +97,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
 
   // Builds a fresh recognition instance with all event handlers wired up.
   // Called both on initial start and after resuming from pause.
-  const buildRecognition = useCallback(() => {
+  const buildRecognition = useCallback((mode: RecognitionMode) => {
     const SR =
       (window as any).SpeechRecognition ||
       (window as any).webkitSpeechRecognition;
@@ -88,6 +111,11 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
 
     rec.onstart = () => {
       isRecognitionStartingRef.current = false;
+      recognitionModeRef.current = mode;
+      if (mode === "manual") {
+        setIsManualListening(true);
+        return;
+      }
       setIsBackgroundListening(true);
       isBackgroundListeningRef.current = true;
     };
@@ -103,20 +131,24 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
       const full = final || interim;
       if (!full) return;
 
+      if (mode === "manual") {
+        appendFinalTranscript(final);
+        updateTranscript(interim);
+        return;
+      }
+
       // Detect wake word only when not already active
       if (!isActiveRef.current && containsWakeWord(full)) {
         isActiveRef.current = true;
         setIsActive(true);
-        transcriptBufferRef.current = "";
-        setTranscript("");
+        resetTranscript();
         optionsRef.current.onActivation?.();
       }
 
       // Buffer speech while active and reset the silence deadline
       if (isActiveRef.current) {
-        transcriptBufferRef.current +=
-          (transcriptBufferRef.current ? " " : "") + full;
-        setTranscript(transcriptBufferRef.current.trim());
+        appendFinalTranscript(full);
+        updateTranscript();
         clearSilenceTimer();
         silenceTimerRef.current = setTimeout(
           handleSilenceTimeout,
@@ -132,8 +164,10 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
         isBackgroundListeningRef.current = false;
         isPausedRef.current = false;
         isRecognitionStartingRef.current = false;
+        recognitionModeRef.current = null;
         recognitionRef.current = null;
         setIsBackgroundListening(false);
+        setIsManualListening(false);
         setIsActive(false);
         isActiveRef.current = false;
         setError("Permiso de microfono denegado");
@@ -145,12 +179,17 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     rec.onend = () => {
       recognitionRef.current = null;
       isRecognitionStartingRef.current = false;
+      if (mode === "manual") {
+        setIsManualListening(false);
+        recognitionModeRef.current = null;
+        return;
+      }
       // Auto-restart only if we are supposed to be listening AND not paused.
       // This is what keeps background listening alive through natural end events,
       // while respecting deliberate pauses during TTS playback.
       if (isBackgroundListeningRef.current && !isPausedRef.current) {
         if (recognitionRef.current || isRecognitionStartingRef.current) return;
-        const next = buildRecognition();
+        const next = buildRecognition("background");
         if (!next) return;
         recognitionRef.current = next;
         isRecognitionStartingRef.current = true;
@@ -167,10 +206,13 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     return rec;
   }, [
     language,
+    appendFinalTranscript,
     containsWakeWord,
     handleSilenceTimeout,
+    resetTranscript,
     silenceTimeout,
     clearSilenceTimer,
+    updateTranscript,
   ]);
 
   const startBackgroundListening = useCallback(() => {
@@ -190,7 +232,8 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
       return;
     }
 
-    const rec = buildRecognition();
+    recognitionModeRef.current = "background";
+    const rec = buildRecognition("background");
     if (!rec) return;
     recognitionRef.current = rec;
     isRecognitionStartingRef.current = true;
@@ -200,15 +243,82 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
       isBackgroundListeningRef.current = false;
       isRecognitionStartingRef.current = false;
       recognitionRef.current = null;
+      recognitionModeRef.current = null;
       setIsBackgroundListening(false);
       setError(`Error al iniciar reconocimiento: ${err.message}`);
     }
   }, [buildRecognition]);
 
+  const startManualListening = useCallback((): boolean => {
+    const SR =
+      (window as any).SpeechRecognition ||
+      (window as any).webkitSpeechRecognition;
+    if (!SR) {
+      setError("Reconocimiento de voz no soportado en este navegador");
+      return false;
+    }
+
+    setError(null);
+    clearSilenceTimer();
+    resetTranscript();
+    isActiveRef.current = false;
+    setIsActive(false);
+    isBackgroundListeningRef.current = false;
+    isPausedRef.current = false;
+    setIsBackgroundListening(false);
+
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {}
+      recognitionRef.current = null;
+    }
+
+    if (isRecognitionStartingRef.current) {
+      return true;
+    }
+
+    recognitionModeRef.current = "manual";
+    const rec = buildRecognition("manual");
+    if (!rec) return false;
+    recognitionRef.current = rec;
+    isRecognitionStartingRef.current = true;
+    try {
+      rec.start();
+      return true;
+    } catch (err: any) {
+      isRecognitionStartingRef.current = false;
+      recognitionModeRef.current = null;
+      recognitionRef.current = null;
+      setIsManualListening(false);
+      setError(`Error al iniciar reconocimiento: ${err.message}`);
+      return false;
+    }
+  }, [buildRecognition, clearSilenceTimer, resetTranscript]);
+
+  const stopManualListening = useCallback((): string => {
+    const captured =
+      latestTranscriptRef.current.trim() || transcriptBufferRef.current.trim();
+
+    isRecognitionStartingRef.current = false;
+    recognitionModeRef.current = null;
+
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {}
+      recognitionRef.current = null;
+    }
+
+    setIsManualListening(false);
+    return captured;
+  }, []);
+
   const stopBackgroundListening = useCallback(() => {
     isBackgroundListeningRef.current = false;
     isPausedRef.current = false;
     isRecognitionStartingRef.current = false;
+    recognitionModeRef.current = null;
     clearSilenceTimer();
 
     if (recognitionRef.current) {
@@ -219,6 +329,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     }
 
     setIsBackgroundListening(false);
+    setIsManualListening(false);
     setIsActive(false);
     isActiveRef.current = false;
   }, [clearSilenceTimer]);
@@ -251,7 +362,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
       if (isPausedRef.current || !isBackgroundListeningRef.current) return;
       if (recognitionRef.current || isRecognitionStartingRef.current) return;
 
-      const rec = buildRecognition();
+      const rec = buildRecognition("background");
       if (!rec) return;
       recognitionRef.current = rec;
       isRecognitionStartingRef.current = true;
@@ -273,10 +384,9 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
   const resetActive = useCallback(() => {
     isActiveRef.current = false;
     setIsActive(false);
-    transcriptBufferRef.current = "";
-    setTranscript("");
+    resetTranscript();
     clearSilenceTimer();
-  }, [clearSilenceTimer]);
+  }, [clearSilenceTimer, resetTranscript]);
 
   useEffect(() => {
     return () => {
@@ -286,12 +396,15 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
 
   return {
     isBackgroundListening,
+    isManualListening,
     isActive,
     isProcessing,
     transcript,
     error,
     startBackgroundListening,
     stopBackgroundListening,
+    startManualListening,
+    stopManualListening,
     pauseRecognition,
     resumeRecognition,
     resetActive,
