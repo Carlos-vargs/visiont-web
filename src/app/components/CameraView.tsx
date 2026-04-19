@@ -179,8 +179,11 @@ export function CameraView() {
         if (!frame || signal.aborted) return;
 
         const prompt = transcript
-          ? `El usuario dijo: "${transcript}". Responde a lo que pide basandote en la imagen. ` +
-            `Si solicita identificar objetos proporciona maximo 4 con distancias aproximadas. ` +
+          ? `Solicitud del usuario: "${transcript}". Responde primero exactamente esa solicitud usando la imagen. ` +
+            `No describas toda la escena ni enumeres objetos alrededor si no ayudan a responder. ` +
+            `Si lo solicitado no es visible, dilo claramente y agrega solo contexto minimo util. ` +
+            `Incluye riesgos criticos evidentes despues de responder lo pedido. ` +
+            `Las detecciones deben ser solo elementos relacionados con la solicitud o riesgos criticos. ` +
             `Responde en JSON con 'feedback' y 'detections' (maximo 4 objetos si aplica).`
           : `Describe lo que ves. Identifica maximo 4 objetos principales con distancias aproximadas. ` +
             `Responde en JSON con 'feedback' y 'detections'.`;

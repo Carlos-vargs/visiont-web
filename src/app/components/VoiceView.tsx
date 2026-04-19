@@ -13,6 +13,12 @@ const PROFILE_IMAGE =
   "https://images.unsplash.com/photo-1577565177023-d0f29c354b69?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxwZXJzb24lMjBwb3J0cmFpdCUyMGNsb3NlJTIwdXAlMjBwcm9maWxlfGVufDF8fHx8MTc3NTUyODg1Mnww&ixlib=rb-4.1.0&q=80&w=400";
 const MICROPHONE_RECOVERY_MESSAGE =
   "El navegador no permitio abrir el microfono aunque ya estaba autorizado. Revisa ajustes o intenta recargar.";
+const GENERAL_SCENE_PROMPT =
+  "Solicitud del usuario: \"¿Qué hay frente a mí?\". Describe brevemente los objetos principales frente al usuario, personas, obstaculos y texto visible importante. Proporciona distancias aproximadas si son utiles.";
+const READ_TEXT_PROMPT =
+  "Solicitud del usuario: \"Lee el texto visible en la imagen\". Transcribe directamente el texto visible. No describas el entorno salvo que ayude a ubicar el texto o exista una alerta critica.";
+const IMAGE_REQUIRED_MESSAGE =
+  "Necesito una imagen de la camara para responder eso. Activa la camara o captura una imagen primero.";
 
 const isAbortLikeError = (error: unknown) => {
   const err = error as { name?: string; message?: string };
@@ -191,13 +197,28 @@ export function VoiceView() {
       try {
         let response: string;
 
-        if (action === "¿Qué hay frente a mí?" && cameraPreview) {
-          // Send captured frame to Gemini
-          const imageResponse = await sendImageWithPrompt(
-            cameraPreview,
-            "Describe detalladamente lo que ves en esta imagen. ¿Qué objetos hay? ¿Hay personas? ¿Hay obstáculos? ¿Hay texto visible? Proporciona distancias aproximadas.",
-          );
-          response = imageResponse.feedback;
+        if (action === "¿Qué hay frente a mí?") {
+          const imageForPrompt = cameraPreview ?? captureFrame();
+          if (!imageForPrompt) {
+            response = IMAGE_REQUIRED_MESSAGE;
+          } else {
+            const imageResponse = await sendImageWithPrompt(
+              imageForPrompt,
+              GENERAL_SCENE_PROMPT,
+            );
+            response = imageResponse.feedback;
+          }
+        } else if (action === "Lee el texto visible en la imagen") {
+          const imageForPrompt = cameraPreview ?? captureFrame();
+          if (!imageForPrompt) {
+            response = IMAGE_REQUIRED_MESSAGE;
+          } else {
+            const imageResponse = await sendImageWithPrompt(
+              imageForPrompt,
+              READ_TEXT_PROMPT,
+            );
+            response = imageResponse.feedback;
+          }
         } else {
           response = await sendTextMessage(userText);
         }

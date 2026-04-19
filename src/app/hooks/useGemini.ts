@@ -215,11 +215,19 @@ Mantén las respuestas informativas pero breves (2-3 oraciones máximo para feed
                 {
                   text: `${prompt}
 
-IMPORTANTE: Proporciona UN MÁXIMO DE 4 OBJÉTOS en las detecciones. No incluyas más de 4.
+Reglas de prioridad:
+- Si hay una solicitud del usuario, responde primero exactamente esa solicitud.
+- No describas ni enumeres objetos alrededor salvo que ayuden directamente a responder.
+- Si el usuario pide leer texto, transcribe el texto visible de forma directa.
+- Si el usuario pide localizar o identificar algo, da ubicacion/distancia solo de eso.
+- Si lo solicitado no es visible, dilo claramente sin inventar detalles.
+- Agrega alertas de seguridad solo si son criticas y evidentes.
 
-Responde en el siguiente formato JSON si es posible, o en texto normal si no puedes detectar objetos específicos:
+IMPORTANTE: Proporciona UN MAXIMO DE 4 OBJETOS en las detecciones. No incluyas mas de 4 y prioriza solo elementos relacionados con la solicitud o riesgos criticos.
+
+Responde en el siguiente formato JSON si es posible, o en texto normal si no puedes detectar objetos especificos:
 {
-  "feedback": "Descripción general de lo que ves",
+  "feedback": "Respuesta directa a la solicitud del usuario",
   "detections": [
     {
       "label": "nombre del objeto",
@@ -233,7 +241,7 @@ Responde en el siguiente formato JSON si es posible, o en texto normal si no pue
   ]
 }
 
-Proporciona coordenadas aproximadas (x, y como porcentaje de la imagen desde la esquina superior izquierda, w y h como porcentaje del tamaño de la imagen). Máximo 4 detecciones.`,
+Proporciona coordenadas aproximadas (x, y como porcentaje de la imagen desde la esquina superior izquierda, w y h como porcentaje del tamano de la imagen). Maximo 4 detecciones.`,
                 },
               ],
             },
