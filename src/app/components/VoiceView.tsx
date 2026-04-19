@@ -12,6 +12,11 @@ import { FeedbackModal } from "./FeedbackModal";
 const PROFILE_IMAGE =
   "https://images.unsplash.com/photo-1577565177023-d0f29c354b69?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxwZXJzb24lMjBwb3J0cmFpdCUyMGNsb3NlJTIwdXAlMjBwcm9maWxlfGVufDF8fHx8MTc3NTUyODg1Mnww&ixlib=rb-4.1.0&q=80&w=400";
 
+const isAbortLikeError = (error: unknown) => {
+  const err = error as { name?: string; message?: string };
+  return err?.name === "AbortError" || /abort/i.test(err?.message || "");
+};
+
 export function VoiceView() {
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -39,6 +44,7 @@ export function VoiceView() {
     error: geminiError,
     sendTextMessage,
     sendImageWithPrompt,
+    cancelActiveRequest,
   } = useGemini();
 
   const {
@@ -49,6 +55,7 @@ export function VoiceView() {
     startListening,
     stopListening,
     speakText,
+    cancelSpeech,
   } = useAudio({
     sendSampleRate: 16000,
     enableEchoCancellation: true,
@@ -68,6 +75,18 @@ export function VoiceView() {
   });
 
   const isActive = audioListening || audioSpeaking;
+
+  const interruptAndStartListening = useCallback(async () => {
+    cancelActiveRequest();
+    stopListening();
+    cancelSpeech();
+    setIsListening(false);
+    await speakText("Cancelando");
+
+    const started = await startListening();
+    if (!started) return;
+    setIsListening(true);
+  }, [cancelActiveRequest, cancelSpeech, speakText, startListening, stopListening]);
 
   // Handle mic press
   const handleMicPress = useCallback(async () => {
@@ -97,15 +116,25 @@ export function VoiceView() {
         // Speak the response
         speakText(response);
       } catch (err) {
-        console.error("Error getting Gemini response:", err);
+        if (!isAbortLikeError(err)) {
+          console.error("Error getting Gemini response:", err);
+        }
       }
     } else {
+      if (audioSpeaking || geminiLoading) {
+        await interruptAndStartListening();
+        return;
+      }
+
       const started = await startListening();
       if (!started) return;
       setIsListening(true);
     }
   }, [
     isListening,
+    audioSpeaking,
+    geminiLoading,
+    interruptAndStartListening,
     startListening,
     stopListening,
     sendTextMessage,
@@ -147,10 +176,11 @@ export function VoiceView() {
 
         if (action === "¿Qué hay frente a mí?" && cameraPreview) {
           // Send captured frame to Gemini
-          response = await sendImageWithPrompt(
+          const imageResponse = await sendImageWithPrompt(
             cameraPreview,
             "Describe detalladamente lo que ves en esta imagen. ¿Qué objetos hay? ¿Hay personas? ¿Hay obstáculos? ¿Hay texto visible? Proporciona distancias aproximadas.",
           );
+          response = imageResponse.feedback;
         } else {
           response = await sendTextMessage(userText);
         }
@@ -165,7 +195,9 @@ export function VoiceView() {
         // Speak the response
         speakText(response);
       } catch (err) {
-        console.error("Error getting Gemini response:", err);
+        if (!isAbortLikeError(err)) {
+          console.error("Error getting Gemini response:", err);
+        }
       }
     },
     [

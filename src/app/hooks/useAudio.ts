@@ -10,6 +10,7 @@ type AudioOptions = {
 type SpeechQueueItem = {
   text: string;
   resolve: () => void;
+  resolved?: boolean;
 };
 
 // Int16Array -> Base64
@@ -64,6 +65,15 @@ const getInlineWorkletCode = (chunkSize: number) => `
   registerProcessor('audio-processor', AudioProcessor);
 `;
 
+const resolveSpeechItem = (item: SpeechQueueItem | null) => {
+  if (!item || item.resolved) {
+    return;
+  }
+
+  item.resolved = true;
+  item.resolve();
+};
+
 export function useAudio(options: AudioOptions = {}) {
   const {
     sendSampleRate = 16000,
@@ -96,6 +106,8 @@ export function useAudio(options: AudioOptions = {}) {
   const isSpeechProcessingRef = useRef(false);
   // Tracks the utterance currently being spoken so cancelSpeech can abort it
   const currentUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const currentSpeechItemRef = useRef<SpeechQueueItem | null>(null);
+  const speechGenerationRef = useRef(0);
 
   // --- Worklet helpers ---
 
@@ -302,10 +314,15 @@ export function useAudio(options: AudioOptions = {}) {
   const processSpeechQueue = useCallback(async () => {
     if (isSpeechProcessingRef.current) return;
     isSpeechProcessingRef.current = true;
+    const generation = speechGenerationRef.current;
     setIsSpeaking(true);
 
-    while (speechQueueRef.current.length > 0) {
+    while (
+      speechQueueRef.current.length > 0 &&
+      generation === speechGenerationRef.current
+    ) {
       const item = speechQueueRef.current.shift()!;
+      currentSpeechItemRef.current = item;
 
       await new Promise<void>((innerResolve) => {
         const utterance = new SpeechSynthesisUtterance(item.text);
@@ -315,13 +332,17 @@ export function useAudio(options: AudioOptions = {}) {
 
         // Resolve the caller's outer promise when this utterance finishes
         utterance.onend = () => {
-          currentUtteranceRef.current = null;
-          item.resolve();
+          if (currentUtteranceRef.current === utterance) {
+            currentUtteranceRef.current = null;
+          }
+          resolveSpeechItem(item);
           innerResolve();
         };
         utterance.onerror = () => {
-          currentUtteranceRef.current = null;
-          item.resolve();
+          if (currentUtteranceRef.current === utterance) {
+            currentUtteranceRef.current = null;
+          }
+          resolveSpeechItem(item);
           innerResolve();
         };
 
@@ -335,10 +356,16 @@ export function useAudio(options: AudioOptions = {}) {
         currentUtteranceRef.current = utterance;
         window.speechSynthesis.speak(utterance);
       });
+
+      if (currentSpeechItemRef.current === item) {
+        currentSpeechItemRef.current = null;
+      }
     }
 
-    isSpeechProcessingRef.current = false;
-    setIsSpeaking(false);
+    if (generation === speechGenerationRef.current) {
+      isSpeechProcessingRef.current = false;
+      setIsSpeaking(false);
+    }
   }, []);
 
   /**
@@ -367,9 +394,13 @@ export function useAudio(options: AudioOptions = {}) {
    * Use this before cancelling an analysis or when the user requests stop.
    */
   const cancelSpeech = useCallback(() => {
+    speechGenerationRef.current += 1;
+
     // Resolve and discard all pending items
     const pending = speechQueueRef.current.splice(0);
-    pending.forEach((item) => item.resolve());
+    pending.forEach((item) => resolveSpeechItem(item));
+    resolveSpeechItem(currentSpeechItemRef.current);
+    currentSpeechItemRef.current = null;
 
     // Stop whatever is currently being spoken
     window.speechSynthesis.cancel();

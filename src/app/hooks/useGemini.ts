@@ -21,6 +21,11 @@ type GeminiResponse = {
   detections: DetectionResult[];
 };
 
+const isAbortError = (error: unknown) => {
+  const err = error as { name?: string; message?: string };
+  return err?.name === "AbortError" || /abort/i.test(err?.message || "");
+};
+
 export function useGemini() {
   const [isConnected, setIsConnected] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -31,6 +36,46 @@ export function useGemini() {
   const liveSessionRef = useRef<any>(null);
   const audioInputQueueRef = useRef<any[]>([]);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const activeRequestIdRef = useRef(0);
+
+  const cancelActiveRequest = useCallback(() => {
+    activeRequestIdRef.current += 1;
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    setIsLoading(false);
+  }, []);
+
+  const beginRequest = useCallback(() => {
+    cancelActiveRequest();
+    const controller = new AbortController();
+    const requestId = activeRequestIdRef.current + 1;
+    activeRequestIdRef.current = requestId;
+    abortControllerRef.current = controller;
+    setIsLoading(true);
+    setError(null);
+
+    return { controller, requestId };
+  }, [cancelActiveRequest]);
+
+  const isCurrentRequest = useCallback(
+    (requestId: number, controller: AbortController) =>
+      activeRequestIdRef.current === requestId &&
+      abortControllerRef.current === controller &&
+      !controller.signal.aborted,
+    [],
+  );
+
+  const finishRequest = useCallback(
+    (requestId: number, controller: AbortController) => {
+      if (!isCurrentRequest(requestId, controller)) {
+        return;
+      }
+
+      abortControllerRef.current = null;
+      setIsLoading(false);
+    },
+    [isCurrentRequest],
+  );
 
   useEffect(() => {
     const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
@@ -91,8 +136,7 @@ Mantén las respuestas informativas pero breves (2-3 oraciones máximo para feed
         throw new Error("Cliente de Gemini no disponible");
       }
 
-      setIsLoading(true);
-      setError(null);
+      const { controller, requestId } = beginRequest();
 
       try {
         // Agregar mensaje del usuario al historial
@@ -107,6 +151,7 @@ Mantén las respuestas informativas pero breves (2-3 oraciones máximo para feed
 
         const response = await aiRef.current.models.generateContent({
           model: "gemini-2.5-flash",
+          config: { abortSignal: controller.signal },
           contents: [
             ...chatHistory,
             {
@@ -117,6 +162,9 @@ Mantén las respuestas informativas pero breves (2-3 oraciones máximo para feed
         });
 
         const responseText = response.text || "No pude generar una respuesta";
+        if (!isCurrentRequest(requestId, controller)) {
+          throw new DOMException("Request superseded", "AbortError");
+        }
         
         // Agregar respuesta del modelo al historial
         const modelMsg: GeminiMessage = { role: "model", text: responseText };
@@ -124,14 +172,20 @@ Mantén las respuestas informativas pero breves (2-3 oraciones máximo para feed
 
         return responseText;
       } catch (err: any) {
+        if (controller.signal.aborted || isAbortError(err)) {
+          throw err;
+        }
+
         const errorMsg = err.message || "Error al enviar mensaje";
-        setError(errorMsg);
+        if (isCurrentRequest(requestId, controller)) {
+          setError(errorMsg);
+        }
         throw err;
       } finally {
-        setIsLoading(false);
+        finishRequest(requestId, controller);
       }
     },
-    [messages]
+    [beginRequest, finishRequest, isCurrentRequest, messages]
   );
 
   const sendImageWithPrompt = useCallback(
@@ -143,12 +197,12 @@ Mantén las respuestas informativas pero breves (2-3 oraciones máximo para feed
         throw new Error("Cliente de Gemini no disponible");
       }
 
-      setIsLoading(true);
-      setError(null);
+      const { controller, requestId } = beginRequest();
 
       try {
         const response = await aiRef.current.models.generateContent({
           model: "gemini-2.5-flash",
+          config: { abortSignal: controller.signal },
           contents: [
             {
               parts: [
@@ -187,6 +241,9 @@ Proporciona coordenadas aproximadas (x, y como porcentaje de la imagen desde la 
         });
 
         const responseText = response.text || "No pude analizar la imagen";
+        if (!isCurrentRequest(requestId, controller)) {
+          throw new DOMException("Request superseded", "AbortError");
+        }
 
         // Intentar parsear JSON de la respuesta
         let parsed: GeminiResponse = { feedback: responseText, detections: [] };
@@ -211,14 +268,20 @@ Proporciona coordenadas aproximadas (x, y como porcentaje de la imagen desde la 
 
         return parsed;
       } catch (err: any) {
+        if (controller.signal.aborted || isAbortError(err)) {
+          throw err;
+        }
+
         const errorMsg = err.message || "Error al analizar imagen";
-        setError(errorMsg);
+        if (isCurrentRequest(requestId, controller)) {
+          setError(errorMsg);
+        }
         throw err;
       } finally {
-        setIsLoading(false);
+        finishRequest(requestId, controller);
       }
     },
-    []
+    [beginRequest, finishRequest, isCurrentRequest]
   );
 
   const sendRealtimeAudio = useCallback(async () => {
@@ -235,8 +298,7 @@ Proporciona coordenadas aproximadas (x, y como porcentaje de la imagen desde la 
         throw new Error("Cliente de Gemini no disponible");
       }
 
-      setIsLoading(true);
-      setError(null);
+      const { controller, requestId } = beginRequest();
 
       try {
         // Enviar audio como parte del mensaje
@@ -260,35 +322,42 @@ Proporciona coordenadas aproximadas (x, y como porcentaje de la imagen desde la 
 
         const response = await aiRef.current.models.generateContent({
           model: "gemini-2.5-flash",
+          config: { abortSignal: controller.signal },
           contents,
         });
 
         const responseText = response.text || "No pude procesar el audio";
+        if (!isCurrentRequest(requestId, controller)) {
+          throw new DOMException("Request superseded", "AbortError");
+        }
 
         const modelMsg: GeminiMessage = { role: "model", text: responseText };
         setMessages((prev) => [...prev, modelMsg]);
 
         return responseText;
       } catch (err: any) {
+        if (controller.signal.aborted || isAbortError(err)) {
+          throw err;
+        }
+
         const errorMsg = err.message || "Error al procesar audio";
-        setError(errorMsg);
+        if (isCurrentRequest(requestId, controller)) {
+          setError(errorMsg);
+        }
         throw err;
       } finally {
-        setIsLoading(false);
+        finishRequest(requestId, controller);
       }
     },
-    []
+    [beginRequest, finishRequest, isCurrentRequest]
   );
 
   const disconnect = useCallback(() => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-    }
+    cancelActiveRequest();
     liveSessionRef.current = null;
     audioInputQueueRef.current = [];
     setIsConnected(false);
-  }, []);
+  }, [cancelActiveRequest]);
 
   const clearHistory = useCallback(() => {
     setMessages([]);
@@ -304,6 +373,7 @@ Proporciona coordenadas aproximadas (x, y como porcentaje de la imagen desde la 
     sendImageWithPrompt,
     sendRealtimeAudio,
     sendAudioChunk,
+    cancelActiveRequest,
     disconnect,
     clearHistory,
   };

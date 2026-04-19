@@ -88,6 +88,7 @@ export function CameraView() {
     isLoading: geminiLoading,
     error: geminiError,
     sendImageWithPrompt,
+    cancelActiveRequest,
   } = useGemini();
 
   const {
@@ -229,6 +230,7 @@ export function CameraView() {
 
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
+    cancelActiveRequest();
 
     if (captureTimeoutRef.current) {
       clearTimeout(captureTimeoutRef.current);
@@ -246,7 +248,13 @@ export function CameraView() {
     resumeRecognition();
 
     if (hadActivity) speakText("Cancelando");
-  }, [cancelSpeech, speakText, resetActive, resumeRecognition]);
+  }, [
+    cancelActiveRequest,
+    cancelSpeech,
+    speakText,
+    resetActive,
+    resumeRecognition,
+  ]);
 
   // ─── Assign stable refs ───────────────────────────────────────────────────────
 
@@ -269,6 +277,31 @@ export function CameraView() {
     startVoiceListeningRef.current = startVoiceListening;
   }, [startVoiceListening]);
 
+  const interruptAndStartListening = useCallback(async () => {
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    cancelActiveRequest();
+    stopAudioListening();
+    cancelSpeech();
+    isAnalysisInProgressRef.current = false;
+    setIsAnalyzing(false);
+    setIsListening(false);
+    resetActive();
+
+    await speakText("Cancelando");
+
+    const started = await startAudioListening();
+    if (!started) return;
+    setIsListening(true);
+  }, [
+    cancelActiveRequest,
+    cancelSpeech,
+    resetActive,
+    speakText,
+    startAudioListening,
+    stopAudioListening,
+  ]);
+
   // ─── Mic button ───────────────────────────────────────────────────────────────
 
   /**
@@ -277,15 +310,15 @@ export function CameraView() {
    * idle       ->  request permission, start listening
    */
   const handleMicPress = useCallback(async () => {
-    if (isAnalyzing) {
-      cancelAnalysis();
-      return;
-    }
-
     if (isListening) {
       stopAudioListening();
       setIsListening(false);
       await executeSingleAnalysis();
+      return;
+    }
+
+    if (isAnalyzing || geminiLoading || audioSpeaking) {
+      await interruptAndStartListening();
       return;
     }
 
@@ -296,9 +329,11 @@ export function CameraView() {
   }, [
     isAnalyzing,
     isListening,
-    cancelAnalysis,
+    geminiLoading,
+    audioSpeaking,
     stopAudioListening,
     executeSingleAnalysis,
+    interruptAndStartListening,
     startAudioListening,
     speakText,
   ]);

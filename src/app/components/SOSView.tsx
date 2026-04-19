@@ -135,6 +135,8 @@ export function SOSView() {
   const isSpeakingRef = useRef(false);
   const isListeningRef = useRef(false);
   const isProcessingVoiceRef = useRef(false);
+  const speechStatusIdRef = useRef(0);
+  const voiceCommandCycleRef = useRef(0);
   const contactsRef = useRef<Contact[]>(initialContacts);
   const sosActiveRef = useRef(sosActive);
   const pendingCallNameRef = useRef<string | null>(null);
@@ -184,6 +186,7 @@ export function SOSView() {
     startListening: startAudioListening,
     stopListening: stopAudioListening,
     speakText,
+    cancelSpeech,
   } = useAudio({
     sendSampleRate: 16000,
     enableEchoCancellation: true,
@@ -201,15 +204,19 @@ export function SOSView() {
   // speakStatus - patrón idéntico a CameraView
   const speakStatus = useCallback(
     async (text: string) => {
-      window.speechSynthesis.cancel();
+      const speechStatusId = speechStatusIdRef.current + 1;
+      speechStatusIdRef.current = speechStatusId;
+      cancelSpeech();
       isSpeakingRef.current = true;
       try {
         await speakText(text);
       } finally {
-        isSpeakingRef.current = false;
+        if (speechStatusIdRef.current === speechStatusId) {
+          isSpeakingRef.current = false;
+        }
       }
     },
-    [speakText],
+    [cancelSpeech, speakText],
   );
 
   // Countdown SOS
@@ -301,41 +308,51 @@ export function SOSView() {
   );
 
   const handleVoiceCommand = useCallback(
-    async (transcript: string) => {
+    async (transcript: string, commandCycleId = voiceCommandCycleRef.current) => {
+      const isCurrentCommand = () =>
+        voiceCommandCycleRef.current === commandCycleId;
+      const publishStatus = (message: string) => {
+        if (!isCurrentCommand()) {
+          return false;
+        }
+
+        setVoiceStatus(message);
+        void speakStatus(message);
+        return true;
+      };
+
       const normalized = normalizeText(transcript);
       const intent = parseVoiceIntent(transcript, parseContactName);
 
       if (intent.type === "activate_sos") {
         if (!sosActiveRef.current) {
           setSosActive(true);
-          setVoiceStatus("Activando emergencia");
-          void speakStatus("Activando emergencia");
+          publishStatus("Activando emergencia");
         }
         return;
       }
 
       if (intent.type === "cancel_sos" && sosActiveRef.current) {
         cancelSOS();
-        void speakStatus("Emergencia cancelada");
+        publishStatus("Emergencia cancelada");
         return;
       }
 
       if (intent.type === "call") {
         const contact = await resolveContactByName(intent.contactName);
+        if (!isCurrentCommand()) return;
         if (contact) {
           pendingCallNameRef.current = null;
           await callContact(contact.phone, contact.name);
         } else if (isContactPickerSupported || canListDeviceContacts) {
           pendingCallNameRef.current = intent.contactName;
           const message = `No encontre a ${intent.contactName}. Toca Agregar para elegirlo o sincroniza contactos.`;
-          setVoiceStatus(message);
-          void speakStatus(message);
+          publishStatus(message);
         } else {
           pendingCallNameRef.current = intent.contactName;
           setShowManualInput(true);
           const message = `No puedo leer tus contactos aqui. Ingresa el numero manualmente para ${intent.contactName}.`;
-          setVoiceStatus(message);
-          void speakStatus(message);
+          publishStatus(message);
         }
         return;
       }
@@ -343,29 +360,27 @@ export function SOSView() {
       if (intent.type === "search_contact") {
         if (intent.contactName) {
           const contact = await resolveContactByName(intent.contactName);
+          if (!isCurrentCommand()) return;
           if (contact) {
             const message = `Encontre a ${contact.name} con numero ${contact.phone}`;
-            setVoiceStatus(message);
-            void speakStatus(message);
+            publishStatus(message);
           } else {
             const message = `No encontre a ${intent.contactName}.`;
-            setVoiceStatus(message);
-            void speakStatus(message);
+            publishStatus(message);
           }
           return;
         }
         if (canListDeviceContacts) {
           await requestAndSyncContacts();
+          if (!isCurrentCommand()) return;
         } else if (isContactPickerSupported) {
           const message = "Toca Agregar para seleccionar un contacto.";
-          setVoiceStatus(message);
-          void speakStatus(message);
+          publishStatus(message);
         } else {
           setShowManualInput(true);
           const message =
             "Este dispositivo no permite abrir contactos. Ingresa el numero manualmente.";
-          setVoiceStatus(message);
-          void speakStatus(message);
+          publishStatus(message);
         }
         return;
       }
@@ -373,6 +388,7 @@ export function SOSView() {
       if (intent.type === "add_contact") {
         if (intent.contactName) {
           const contact = await resolveContactByName(intent.contactName);
+          if (!isCurrentCommand()) return;
           if (contact) {
             saveContact({
               ...contact,
@@ -380,31 +396,28 @@ export function SOSView() {
               isEmergency: false,
             });
             const message = `${contact.name} fue agregado como contacto de emergencia`;
-            setVoiceStatus(message);
-            void speakStatus(message);
+            publishStatus(message);
           } else {
             const message = `No encontre a ${intent.contactName}. Toca Agregar para seleccionarlo manualmente.`;
-            setVoiceStatus(message);
-            void speakStatus(message);
+            publishStatus(message);
           }
           return;
         }
         if (normalized.includes("sincroniza") && canListDeviceContacts) {
           await requestAndSyncContacts();
+          if (!isCurrentCommand()) return;
           return;
         }
         const message = canListDeviceContacts
           ? "Toca Permitir o Agregar para seleccionar un contacto del dispositivo."
           : "Toca Agregar para seleccionar un contacto.";
-        setVoiceStatus(message);
-        void speakStatus(message);
+        publishStatus(message);
         return;
       }
 
       const helpMessage =
         "Puedes decir llama a mama, marca a Juan, agrega contacto o activa emergencia.";
-      setVoiceStatus(helpMessage);
-      void speakStatus(helpMessage);
+      publishStatus(helpMessage);
     },
     [
       callContact,
@@ -468,6 +481,8 @@ export function SOSView() {
         console.warn("Voice command already in progress, ignoring request");
         return;
       }
+      const commandCycleId = voiceCommandCycleRef.current + 1;
+      voiceCommandCycleRef.current = commandCycleId;
       isProcessingVoiceRef.current = true;
       setIsProcessingVoice(true);
       setIsListening(false);
@@ -477,20 +492,28 @@ export function SOSView() {
 
       try {
         if (transcript?.trim()) {
-          await handleVoiceCommand(transcript);
+          await handleVoiceCommand(transcript, commandCycleId);
         } else {
           const message =
             "No escuche un comando. Puedes decir llama a mama o activa emergencia.";
-          setVoiceStatus(message);
-          void speakStatus(message);
+          if (voiceCommandCycleRef.current === commandCycleId) {
+            setVoiceStatus(message);
+            void speakStatus(message);
+          }
         }
-        resetActive();
+        if (voiceCommandCycleRef.current === commandCycleId) {
+          resetActive();
+        }
       } catch (err: any) {
         console.error("Error processing voice command:", err);
-        resetActive();
+        if (voiceCommandCycleRef.current === commandCycleId) {
+          resetActive();
+        }
       } finally {
-        isProcessingVoiceRef.current = false;
-        setIsProcessingVoice(false);
+        if (voiceCommandCycleRef.current === commandCycleId) {
+          isProcessingVoiceRef.current = false;
+          setIsProcessingVoice(false);
+        }
       }
     },
     [handleVoiceCommand, resetActive, speakStatus, stopAudioListening],
@@ -513,14 +536,29 @@ export function SOSView() {
     startVoiceListeningRef.current = startVoiceListening;
   }, [startVoiceListening]);
 
+  const interruptAndStartListening = useCallback(async () => {
+    voiceCommandCycleRef.current += 1;
+    stopAudioListening();
+    isProcessingVoiceRef.current = false;
+    setIsProcessingVoice(false);
+    setIsListening(false);
+    resetActive();
+
+    await speakStatus("Cancelando");
+
+    const started = await startAudioListening();
+    if (!started) return;
+    setIsListening(true);
+  }, [resetActive, speakStatus, startAudioListening, stopAudioListening]);
+
   // Iniciar escucha en background al montar
   useEffect(() => {
     // Pequeño delay para asegurar inicialización correcta
     setTimeout(() => startBackgroundListening(), 500);
     return () => {
-      window.speechSynthesis.cancel();
+      cancelSpeech();
     };
-  }, []);
+  }, [cancelSpeech, startBackgroundListening]);
 
   // Sincronizar contactos cuando hay permiso
   useEffect(() => {
@@ -550,21 +588,17 @@ export function SOSView() {
     clearContactPickerError();
     setShowManualInput(false);
 
-    // Estado 1: Procesando -> CANCELAR
-    if (isProcessingVoice) {
-      window.speechSynthesis.cancel();
-      isProcessingVoiceRef.current = false;
-      setIsProcessingVoice(false);
-      resetActive();
-      void speakStatus("Cancelando");
-      return;
-    }
-
-    // Estado 2: Escuchando -> DETENER Y PROCESAR
+    // Estado 1: Escuchando -> DETENER Y PROCESAR
     if (isListening) {
       stopAudioListening();
       setIsListening(false);
       await executeVoiceCommand();
+      return;
+    }
+
+    // Estado 2: Procesando/hablando -> CANCELAR Y PRIORIZAR NUEVA ESCUCHA
+    if (isProcessingVoice || audioSpeaking || isSpeakingRef.current) {
+      await interruptAndStartListening();
       return;
     }
 
@@ -576,6 +610,8 @@ export function SOSView() {
   }, [
     clearContactPickerError,
     executeVoiceCommand,
+    audioSpeaking,
+    interruptAndStartListening,
     isListening,
     isProcessingVoice,
     resetActive,
