@@ -298,8 +298,15 @@ export function CameraView() {
   const beginManualListening = useCallback(
     async (announcement = "Escuchando") => {
       stopAudioListening();
+      const audioStarted = await startAudioListening();
+      if (!audioStarted) {
+        if (hasKnownMicrophoneAccess) void speakText(MICROPHONE_RECOVERY_MESSAGE);
+        return false;
+      }
+
       const started = startManualListening();
       if (!started) {
+        stopAudioListening();
         void speakText(SPEECH_RECOGNITION_UNSUPPORTED_MESSAGE);
         return false;
       }
@@ -307,10 +314,16 @@ export function CameraView() {
       if (announcement) void speakText(announcement);
       return true;
     },
-    [speakText, startManualListening, stopAudioListening],
+    [
+      hasKnownMicrophoneAccess,
+      speakText,
+      startAudioListening,
+      startManualListening,
+      stopAudioListening,
+    ],
   );
 
-  const interruptAndStartListening = useCallback(async () => {
+  const cancelCurrentInteraction = useCallback(async () => {
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
     cancelActiveRequest();
@@ -323,9 +336,7 @@ export function CameraView() {
     resetActive();
 
     await speakText("Cancelando");
-    await beginManualListening();
   }, [
-    beginManualListening,
     cancelActiveRequest,
     cancelSpeech,
     resetActive,
@@ -352,7 +363,7 @@ export function CameraView() {
     }
 
     if (isAnalyzing || geminiLoading || audioSpeaking) {
-      await interruptAndStartListening();
+      await cancelCurrentInteraction();
       return;
     }
 
@@ -363,10 +374,10 @@ export function CameraView() {
     isListening,
     geminiLoading,
     audioSpeaking,
+    cancelCurrentInteraction,
     stopAudioListening,
     stopManualListening,
     executeSingleAnalysis,
-    interruptAndStartListening,
     userTranscript,
   ]);
 

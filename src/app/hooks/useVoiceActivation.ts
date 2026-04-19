@@ -294,7 +294,11 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
       setError(`Error al iniciar reconocimiento: ${err.message}`);
       return false;
     }
-  }, [buildRecognition, clearSilenceTimer, resetTranscript]);
+  }, [
+    buildRecognition,
+    clearSilenceTimer,
+    resetTranscript,
+  ]);
 
   const stopManualListening = useCallback((): string => {
     const captured =
