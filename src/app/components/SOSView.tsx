@@ -30,6 +30,9 @@ const initialContacts: Contact[] = [
   },
 ];
 
+const MICROPHONE_RECOVERY_MESSAGE =
+  "El navegador no permitio abrir el microfono aunque ya estaba autorizado. Revisa ajustes o intenta recargar.";
+
 const getInitials = (name: string): string =>
   name
     .split(" ")
@@ -183,6 +186,7 @@ export function SOSView() {
     isSpeaking: audioSpeaking,
     error: audioError,
     audioLevel,
+    hasKnownMicrophoneAccess,
     startListening: startAudioListening,
     stopListening: stopAudioListening,
     speakText,
@@ -527,10 +531,13 @@ export function SOSView() {
   // startVoiceListening - mismo patron que CameraView
   const startVoiceListening = useCallback(async () => {
     const started = await startAudioListening();
-    if (!started) return;
+    if (!started) {
+      if (hasKnownMicrophoneAccess) void speakStatus(MICROPHONE_RECOVERY_MESSAGE);
+      return;
+    }
     setIsListening(true);
     void speakStatus("Escuchando");
-  }, [speakStatus, startAudioListening]);
+  }, [hasKnownMicrophoneAccess, speakStatus, startAudioListening]);
 
   useEffect(() => {
     startVoiceListeningRef.current = startVoiceListening;
@@ -547,9 +554,18 @@ export function SOSView() {
     await speakStatus("Cancelando");
 
     const started = await startAudioListening();
-    if (!started) return;
+    if (!started) {
+      if (hasKnownMicrophoneAccess) void speakStatus(MICROPHONE_RECOVERY_MESSAGE);
+      return;
+    }
     setIsListening(true);
-  }, [resetActive, speakStatus, startAudioListening, stopAudioListening]);
+  }, [
+    hasKnownMicrophoneAccess,
+    resetActive,
+    speakStatus,
+    startAudioListening,
+    stopAudioListening,
+  ]);
 
   // Iniciar escucha en background al montar
   useEffect(() => {
@@ -604,7 +620,10 @@ export function SOSView() {
 
     // Estado 3: Idle -> INICIAR ESCUCHA
     const started = await startAudioListening();
-    if (!started) return;
+    if (!started) {
+      if (hasKnownMicrophoneAccess) void speakStatus(MICROPHONE_RECOVERY_MESSAGE);
+      return;
+    }
     setIsListening(true);
     void speakStatus("Escuchando, toca para procesar");
   }, [
@@ -612,6 +631,7 @@ export function SOSView() {
     executeVoiceCommand,
     audioSpeaking,
     interruptAndStartListening,
+    hasKnownMicrophoneAccess,
     isListening,
     isProcessingVoice,
     resetActive,

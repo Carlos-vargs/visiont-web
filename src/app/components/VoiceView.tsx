@@ -11,6 +11,8 @@ import { FeedbackModal } from "./FeedbackModal";
 
 const PROFILE_IMAGE =
   "https://images.unsplash.com/photo-1577565177023-d0f29c354b69?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxwZXJzb24lMjBwb3J0cmFpdCUyMGNsb3NlJTIwdXAlMjBwcm9maWxlfGVufDF8fHx8MTc3NTUyODg1Mnww&ixlib=rb-4.1.0&q=80&w=400";
+const MICROPHONE_RECOVERY_MESSAGE =
+  "El navegador no permitio abrir el microfono aunque ya estaba autorizado. Revisa ajustes o intenta recargar.";
 
 const isAbortLikeError = (error: unknown) => {
   const err = error as { name?: string; message?: string };
@@ -52,6 +54,7 @@ export function VoiceView() {
     isSpeaking: audioSpeaking,
     error: audioError,
     audioLevel,
+    hasKnownMicrophoneAccess,
     startListening,
     stopListening,
     speakText,
@@ -84,9 +87,19 @@ export function VoiceView() {
     await speakText("Cancelando");
 
     const started = await startListening();
-    if (!started) return;
+    if (!started) {
+      if (hasKnownMicrophoneAccess) void speakText(MICROPHONE_RECOVERY_MESSAGE);
+      return;
+    }
     setIsListening(true);
-  }, [cancelActiveRequest, cancelSpeech, speakText, startListening, stopListening]);
+  }, [
+    cancelActiveRequest,
+    cancelSpeech,
+    hasKnownMicrophoneAccess,
+    speakText,
+    startListening,
+    stopListening,
+  ]);
 
   // Handle mic press
   const handleMicPress = useCallback(async () => {
@@ -127,13 +140,17 @@ export function VoiceView() {
       }
 
       const started = await startListening();
-      if (!started) return;
+      if (!started) {
+        if (hasKnownMicrophoneAccess) void speakText(MICROPHONE_RECOVERY_MESSAGE);
+        return;
+      }
       setIsListening(true);
     }
   }, [
     isListening,
     audioSpeaking,
     geminiLoading,
+    hasKnownMicrophoneAccess,
     interruptAndStartListening,
     startListening,
     stopListening,

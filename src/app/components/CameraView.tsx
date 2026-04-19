@@ -30,6 +30,8 @@ type DetectionResult = {
 };
 
 const isDevelopment = import.meta.env.VITE_ENVIRONMENT !== "production";
+const MICROPHONE_RECOVERY_MESSAGE =
+  "El navegador no permitio abrir el microfono aunque ya estaba autorizado. Revisa ajustes o intenta recargar.";
 
 export function CameraView() {
   // ─── State ───────────────────────────────────────────────────────────────────
@@ -77,6 +79,7 @@ export function CameraView() {
     isSpeaking: audioSpeaking,
     error: audioError,
     audioLevel,
+    hasKnownMicrophoneAccess,
     startListening: startAudioListening,
     stopListening: stopAudioListening,
     speakText,
@@ -266,12 +269,15 @@ export function CameraView() {
 
   const startVoiceListening = useCallback(async () => {
     const started = await startAudioListening();
-    if (!started) return;
+    if (!started) {
+      if (hasKnownMicrophoneAccess) void speakText(MICROPHONE_RECOVERY_MESSAGE);
+      return;
+    }
     setIsListening(true);
     // No pause here — recognition stays running so the user's question is captured.
     // "Escuchando" is not a wake word so it won't re-trigger activation.
     speakText("Escuchando");
-  }, [startAudioListening, speakText]);
+  }, [hasKnownMicrophoneAccess, startAudioListening, speakText]);
 
   useEffect(() => {
     startVoiceListeningRef.current = startVoiceListening;
@@ -291,12 +297,16 @@ export function CameraView() {
     await speakText("Cancelando");
 
     const started = await startAudioListening();
-    if (!started) return;
+    if (!started) {
+      if (hasKnownMicrophoneAccess) void speakText(MICROPHONE_RECOVERY_MESSAGE);
+      return;
+    }
     setIsListening(true);
   }, [
     cancelActiveRequest,
     cancelSpeech,
     resetActive,
+    hasKnownMicrophoneAccess,
     speakText,
     startAudioListening,
     stopAudioListening,
@@ -323,7 +333,10 @@ export function CameraView() {
     }
 
     const started = await startAudioListening();
-    if (!started) return;
+    if (!started) {
+      if (hasKnownMicrophoneAccess) void speakText(MICROPHONE_RECOVERY_MESSAGE);
+      return;
+    }
     setIsListening(true);
     speakText("Escuchando, tocar para analizar");
   }, [
@@ -334,6 +347,7 @@ export function CameraView() {
     stopAudioListening,
     executeSingleAnalysis,
     interruptAndStartListening,
+    hasKnownMicrophoneAccess,
     startAudioListening,
     speakText,
   ]);

@@ -7,11 +7,28 @@ type AudioOptions = {
   enableEchoCancellation?: boolean;
 };
 
+type MicrophonePermissionStatus =
+  | "unknown"
+  | "granted"
+  | "prompt"
+  | "denied"
+  | "unavailable";
+
+type MicrophonePermissionCache = {
+  status: "granted";
+  updatedAt: number;
+  lastSuccessAt: number;
+};
+
 type SpeechQueueItem = {
   text: string;
   resolve: () => void;
   resolved?: boolean;
 };
+
+const MICROPHONE_PERMISSION_CACHE_KEY = "visiont:microphone-permission";
+const MICROPHONE_RECOVERY_MESSAGE =
+  "El navegador no permitio abrir el microfono aunque ya estaba autorizado. Revisa ajustes o intenta recargar.";
 
 // Int16Array -> Base64
 const int16ToBase64 = (int16Array: Int16Array): string => {
@@ -74,6 +91,62 @@ const resolveSpeechItem = (item: SpeechQueueItem | null) => {
   item.resolve();
 };
 
+const readMicrophonePermissionCache = (): MicrophonePermissionCache | null => {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    const stored = window.localStorage.getItem(MICROPHONE_PERMISSION_CACHE_KEY);
+    if (!stored) {
+      return null;
+    }
+
+    const parsed = JSON.parse(stored) as Partial<MicrophonePermissionCache>;
+    return parsed.status === "granted"
+      ? (parsed as MicrophonePermissionCache)
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+const writeMicrophonePermissionGranted = () => {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    const now = Date.now();
+    window.localStorage.setItem(
+      MICROPHONE_PERMISSION_CACHE_KEY,
+      JSON.stringify({
+        status: "granted",
+        updatedAt: now,
+        lastSuccessAt: now,
+      } satisfies MicrophonePermissionCache),
+    );
+  } catch {
+    // Permission cache is a UX hint only; storage failure must not block audio.
+  }
+};
+
+const queryMicrophonePermission =
+  async (): Promise<MicrophonePermissionStatus> => {
+    if (typeof navigator === "undefined" || !navigator.permissions?.query) {
+      return "unknown";
+    }
+
+    try {
+      const status = await navigator.permissions.query({
+        name: "microphone" as PermissionName,
+      });
+      return status.state;
+    } catch {
+      return "unknown";
+    }
+  };
+
 export function useAudio(options: AudioOptions = {}) {
   const {
     sendSampleRate = 16000,
@@ -85,7 +158,13 @@ export function useAudio(options: AudioOptions = {}) {
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [permissionGranted, setPermissionGranted] = useState(false);
+  const [permissionStatus, setPermissionStatus] =
+    useState<MicrophonePermissionStatus>(() =>
+      readMicrophonePermissionCache() ? "granted" : "unknown",
+    );
+  const [permissionGranted, setPermissionGranted] = useState(
+    () => permissionStatus === "granted",
+  );
   const [audioLevel, setAudioLevel] = useState(0);
 
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -95,6 +174,9 @@ export function useAudio(options: AudioOptions = {}) {
   const onAudioChunkRef = useRef<((chunkBase64: string) => void) | null>(null);
   const isListeningRef = useRef(false);
   const isStartingRef = useRef(false);
+  const hasKnownMicrophoneAccessRef = useRef(
+    Boolean(readMicrophonePermissionCache()),
+  );
 
   // Playback
   const playbackContextRef = useRef<AudioContext | null>(null);
@@ -108,6 +190,26 @@ export function useAudio(options: AudioOptions = {}) {
   const currentUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const currentSpeechItemRef = useRef<SpeechQueueItem | null>(null);
   const speechGenerationRef = useRef(0);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const syncPermissionStatus = async () => {
+      const browserPermissionStatus = await queryMicrophonePermission();
+      if (!isMounted || browserPermissionStatus === "unknown") {
+        return;
+      }
+
+      setPermissionStatus(browserPermissionStatus);
+      setPermissionGranted(browserPermissionStatus === "granted");
+    };
+
+    void syncPermissionStatus();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   // --- Worklet helpers ---
 
@@ -172,9 +274,24 @@ export function useAudio(options: AudioOptions = {}) {
       }
 
       try {
+        if (
+          typeof navigator === "undefined" ||
+          !navigator.mediaDevices?.getUserMedia
+        ) {
+          setPermissionStatus("unavailable");
+          setPermissionGranted(false);
+          setError("Este navegador no permite abrir el microfono.");
+          return false;
+        }
+
         isStartingRef.current = true;
         setError(null);
         onAudioChunkRef.current = onAudioChunk ?? null;
+
+        const browserPermissionStatus = await queryMicrophonePermission();
+        if (browserPermissionStatus !== "unknown") {
+          setPermissionStatus(browserPermissionStatus);
+        }
 
         const audioContext = new AudioContext({ sampleRate: sendSampleRate });
         audioContextRef.current = audioContext;
@@ -221,16 +338,28 @@ export function useAudio(options: AudioOptions = {}) {
 
         isListeningRef.current = true;
         isStartingRef.current = false;
+        hasKnownMicrophoneAccessRef.current = true;
+        writeMicrophonePermissionGranted();
         setIsListening(true);
         setPermissionGranted(true);
+        setPermissionStatus("granted");
         return true;
       } catch (err: any) {
+        const hadKnownAccess =
+          hasKnownMicrophoneAccessRef.current ||
+          permissionStatus === "granted" ||
+          Boolean(readMicrophonePermissionCache());
         const msg =
           err.name === "NotAllowedError"
-            ? "Permiso de microfono denegado. Habilita el acceso en la configuracion del navegador."
+            ? hadKnownAccess
+              ? MICROPHONE_RECOVERY_MESSAGE
+              : "Permiso de microfono denegado. Habilita el acceso en la configuracion del navegador."
             : `Error al acceder al microfono: ${err.message}`;
         setError(msg);
         setPermissionGranted(false);
+        setPermissionStatus(
+          err.name === "NotAllowedError" ? "denied" : "unknown",
+        );
         cleanupInput();
         return false;
       }
@@ -241,6 +370,7 @@ export function useAudio(options: AudioOptions = {}) {
       enableEchoCancellation,
       loadWorkletModule,
       cleanupInput,
+      permissionStatus,
     ]
   );
 
@@ -432,6 +562,9 @@ export function useAudio(options: AudioOptions = {}) {
     isSpeaking,
     error,
     permissionGranted,
+    permissionStatus,
+    hasKnownMicrophoneAccess:
+      hasKnownMicrophoneAccessRef.current || permissionStatus === "granted",
     audioLevel,
     startListening,
     stopListening,
