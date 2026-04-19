@@ -83,6 +83,8 @@ export function useAudio(options: AudioOptions = {}) {
   const audioWorkletNodeRef = useRef<AudioWorkletNode | null>(null);
   const workletBlobUrlRef = useRef<string | null>(null);
   const onAudioChunkRef = useRef<((chunkBase64: string) => void) | null>(null);
+  const isListeningRef = useRef(false);
+  const isStartingRef = useRef(false);
 
   // Playback
   const playbackContextRef = useRef<AudioContext | null>(null);
@@ -134,9 +136,31 @@ export function useAudio(options: AudioOptions = {}) {
 
   // --- Microphone ---
 
+  const cleanupInput = useCallback(() => {
+    if (audioWorkletNodeRef.current) {
+      audioWorkletNodeRef.current.port.postMessage({ type: "stop" });
+      audioWorkletNodeRef.current.disconnect();
+      audioWorkletNodeRef.current = null;
+    }
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+    void audioContextRef.current?.close();
+    audioContextRef.current = null;
+    cleanupWorkletUrl();
+    isListeningRef.current = false;
+    isStartingRef.current = false;
+    setIsListening(false);
+    setAudioLevel(0);
+  }, [cleanupWorkletUrl]);
+
   const startListening = useCallback(
-    async (onAudioChunk?: (chunkBase64: string) => void) => {
+    async (onAudioChunk?: (chunkBase64: string) => void): Promise<boolean> => {
+      if (isListeningRef.current || isStartingRef.current) {
+        return true;
+      }
+
       try {
+        isStartingRef.current = true;
         setError(null);
         onAudioChunkRef.current = onAudioChunk ?? null;
 
@@ -183,39 +207,34 @@ export function useAudio(options: AudioOptions = {}) {
         source.connect(workletNode);
         workletNode.connect(audioContext.destination);
 
+        isListeningRef.current = true;
+        isStartingRef.current = false;
         setIsListening(true);
         setPermissionGranted(true);
+        return true;
       } catch (err: any) {
         const msg =
           err.name === "NotAllowedError"
             ? "Permiso de microfono denegado. Habilita el acceso en la configuracion del navegador."
             : `Error al acceder al microfono: ${err.message}`;
         setError(msg);
-        setIsListening(false);
-        cleanupWorkletUrl();
-        audioContextRef.current?.close();
-        audioContextRef.current = null;
-        streamRef.current?.getTracks().forEach((t) => t.stop());
-        streamRef.current = null;
+        setPermissionGranted(false);
+        cleanupInput();
+        return false;
       }
     },
-    [sendSampleRate, chunkSize, enableEchoCancellation, loadWorkletModule, cleanupWorkletUrl]
+    [
+      sendSampleRate,
+      chunkSize,
+      enableEchoCancellation,
+      loadWorkletModule,
+      cleanupInput,
+    ]
   );
 
   const stopListening = useCallback(() => {
-    if (audioWorkletNodeRef.current) {
-      audioWorkletNodeRef.current.port.postMessage({ type: "stop" });
-      audioWorkletNodeRef.current.disconnect();
-      audioWorkletNodeRef.current = null;
-    }
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    streamRef.current = null;
-    audioContextRef.current?.close();
-    audioContextRef.current = null;
-    cleanupWorkletUrl();
-    setIsListening(false);
-    setAudioLevel(0);
-  }, [cleanupWorkletUrl]);
+    cleanupInput();
+  }, [cleanupInput]);
 
   // --- PCM playback ---
 
@@ -359,20 +378,6 @@ export function useAudio(options: AudioOptions = {}) {
     setIsSpeaking(false);
   }, []);
 
-  // --- Permission helper ---
-
-  const requestMicrophonePermission = useCallback(async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      stream.getTracks().forEach((t) => t.stop());
-      setPermissionGranted(true);
-      return true;
-    } catch {
-      setPermissionGranted(false);
-      return false;
-    }
-  }, []);
-
   // --- Cleanup ---
 
   useEffect(() => {
@@ -402,6 +407,5 @@ export function useAudio(options: AudioOptions = {}) {
     playAudioChunk,
     speakText,
     cancelSpeech,
-    requestMicrophonePermission,
   };
 }

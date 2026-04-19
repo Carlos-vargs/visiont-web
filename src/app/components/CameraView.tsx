@@ -81,7 +81,6 @@ export function CameraView() {
     stopListening: stopAudioListening,
     speakText,
     cancelSpeech,
-    requestMicrophonePermission,
   } = useAudio({ sendSampleRate: 16000, enableEchoCancellation: true });
 
   const {
@@ -258,14 +257,13 @@ export function CameraView() {
   // ─── Voice listening (wake word activation) ───────────────────────────────────
 
   const startVoiceListening = useCallback(async () => {
-    const granted = await requestMicrophonePermission();
-    if (!granted) return;
+    const started = await startAudioListening();
+    if (!started) return;
     setIsListening(true);
-    startAudioListening();
     // No pause here — recognition stays running so the user's question is captured.
     // "Escuchando" is not a wake word so it won't re-trigger activation.
     speakText("Escuchando");
-  }, [requestMicrophonePermission, startAudioListening, speakText]);
+  }, [startAudioListening, speakText]);
 
   useEffect(() => {
     startVoiceListeningRef.current = startVoiceListening;
@@ -291,10 +289,9 @@ export function CameraView() {
       return;
     }
 
-    const granted = await requestMicrophonePermission();
-    if (!granted) return;
+    const started = await startAudioListening();
+    if (!started) return;
     setIsListening(true);
-    startAudioListening();
     speakText("Escuchando, tocar para analizar");
   }, [
     isAnalyzing,
@@ -302,7 +299,6 @@ export function CameraView() {
     cancelAnalysis,
     stopAudioListening,
     executeSingleAnalysis,
-    requestMicrophonePermission,
     startAudioListening,
     speakText,
   ]);

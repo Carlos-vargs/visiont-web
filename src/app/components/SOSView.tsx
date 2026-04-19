@@ -184,7 +184,6 @@ export function SOSView() {
     startListening: startAudioListening,
     stopListening: stopAudioListening,
     speakText,
-    requestMicrophonePermission,
   } = useAudio({
     sendSampleRate: 16000,
     enableEchoCancellation: true,
@@ -504,13 +503,11 @@ export function SOSView() {
 
   // startVoiceListening - mismo patron que CameraView
   const startVoiceListening = useCallback(async () => {
-    const granted = await requestMicrophonePermission();
-    if (granted) {
-      setIsListening(true);
-      startAudioListening();
-      void speakStatus("Escuchando");
-    }
-  }, [requestMicrophonePermission, speakStatus, startAudioListening]);
+    const started = await startAudioListening();
+    if (!started) return;
+    setIsListening(true);
+    void speakStatus("Escuchando");
+  }, [speakStatus, startAudioListening]);
 
   useEffect(() => {
     startVoiceListeningRef.current = startVoiceListening;
@@ -572,18 +569,15 @@ export function SOSView() {
     }
 
     // Estado 3: Idle -> INICIAR ESCUCHA
-    const granted = await requestMicrophonePermission();
-    if (granted) {
-      setIsListening(true);
-      startAudioListening();
-      void speakStatus("Escuchando, toca para procesar");
-    }
+    const started = await startAudioListening();
+    if (!started) return;
+    setIsListening(true);
+    void speakStatus("Escuchando, toca para procesar");
   }, [
     clearContactPickerError,
     executeVoiceCommand,
     isListening,
     isProcessingVoice,
-    requestMicrophonePermission,
     resetActive,
     speakStatus,
     startAudioListening,

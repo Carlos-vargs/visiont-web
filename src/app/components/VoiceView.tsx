@@ -49,7 +49,6 @@ export function VoiceView() {
     startListening,
     stopListening,
     speakText,
-    requestMicrophonePermission,
   } = useAudio({
     sendSampleRate: 16000,
     enableEchoCancellation: true,
@@ -101,14 +100,9 @@ export function VoiceView() {
         console.error("Error getting Gemini response:", err);
       }
     } else {
-      // Request permission first
-      const granted = await requestMicrophonePermission();
-      if (granted) {
-        setIsListening(true);
-
-        // Start listening with callback for audio chunks
-        startListening();
-      }
+      const started = await startListening();
+      if (!started) return;
+      setIsListening(true);
     }
   }, [
     isListening,
@@ -116,7 +110,6 @@ export function VoiceView() {
     stopListening,
     sendTextMessage,
     speakText,
-    requestMicrophonePermission,
   ]);
 
   // Quick action handlers

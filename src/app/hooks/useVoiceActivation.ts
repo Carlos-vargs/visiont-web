@@ -30,6 +30,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
   const isBackgroundListeningRef = useRef(false);
   // Paused when TTS is speaking — prevents the mic from picking up synthesized voice
   const isPausedRef = useRef(false);
+  const isRecognitionStartingRef = useRef(false);
 
   const optionsRef = useRef(options);
   useEffect(() => {
@@ -86,6 +87,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     rec.maxAlternatives = 1;
 
     rec.onstart = () => {
+      isRecognitionStartingRef.current = false;
       setIsBackgroundListening(true);
       isBackgroundListeningRef.current = true;
     };
@@ -127,6 +129,13 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
       // no-speech and aborted are normal during silence / intentional stop
       if (event.error === "no-speech" || event.error === "aborted") return;
       if (event.error === "not-allowed") {
+        isBackgroundListeningRef.current = false;
+        isPausedRef.current = false;
+        isRecognitionStartingRef.current = false;
+        recognitionRef.current = null;
+        setIsBackgroundListening(false);
+        setIsActive(false);
+        isActiveRef.current = false;
         setError("Permiso de microfono denegado");
         return;
       }
@@ -135,16 +144,21 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
 
     rec.onend = () => {
       recognitionRef.current = null;
+      isRecognitionStartingRef.current = false;
       // Auto-restart only if we are supposed to be listening AND not paused.
       // This is what keeps background listening alive through natural end events,
       // while respecting deliberate pauses during TTS playback.
       if (isBackgroundListeningRef.current && !isPausedRef.current) {
+        if (recognitionRef.current || isRecognitionStartingRef.current) return;
         const next = buildRecognition();
         if (!next) return;
         recognitionRef.current = next;
+        isRecognitionStartingRef.current = true;
         try {
           next.start();
         } catch {
+          isRecognitionStartingRef.current = false;
+          recognitionRef.current = null;
           // Already starting — ignore
         }
       }
@@ -172,12 +186,21 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     isBackgroundListeningRef.current = true;
     isPausedRef.current = false;
 
+    if (recognitionRef.current || isRecognitionStartingRef.current) {
+      return;
+    }
+
     const rec = buildRecognition();
     if (!rec) return;
     recognitionRef.current = rec;
+    isRecognitionStartingRef.current = true;
     try {
       rec.start();
     } catch (err: any) {
+      isBackgroundListeningRef.current = false;
+      isRecognitionStartingRef.current = false;
+      recognitionRef.current = null;
+      setIsBackgroundListening(false);
       setError(`Error al iniciar reconocimiento: ${err.message}`);
     }
   }, [buildRecognition]);
@@ -185,6 +208,7 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
   const stopBackgroundListening = useCallback(() => {
     isBackgroundListeningRef.current = false;
     isPausedRef.current = false;
+    isRecognitionStartingRef.current = false;
     clearSilenceTimer();
 
     if (recognitionRef.current) {
@@ -225,14 +249,18 @@ export function useVoiceActivation(options: VoiceActivationOptions = {}) {
     // 350ms gives the OS audio pipeline time to flush the TTS output
     setTimeout(() => {
       if (isPausedRef.current || !isBackgroundListeningRef.current) return;
-      if (recognitionRef.current) return; // already restarted via onend
+      if (recognitionRef.current || isRecognitionStartingRef.current) return;
 
       const rec = buildRecognition();
       if (!rec) return;
       recognitionRef.current = rec;
+      isRecognitionStartingRef.current = true;
       try {
         rec.start();
-      } catch {}
+      } catch {
+        isRecognitionStartingRef.current = false;
+        recognitionRef.current = null;
+      }
     }, 350);
   }, [buildRecognition]);
 
