@@ -24,6 +24,7 @@ type UseSOSInteractionControllerOptions = {
 
 const MICROPHONE_RECOVERY_MESSAGE =
   "El navegador no permitio abrir el microfono aunque ya estaba autorizado. Revisa ajustes o intenta recargar.";
+const PREPARING_MICROPHONE_MESSAGE = "Preparando micrófono";
 
 export function useSOSInteractionController({
   audio,
@@ -92,10 +93,16 @@ export function useSOSInteractionController({
       }
 
       operationLockedRef.current = true;
-      setModeState("starting", "Preparando microfono...");
+      const startCycleId = nextCycle();
+      setModeState("starting", `${PREPARING_MICROPHONE_MESSAGE}...`);
       setErrorMessage(null);
 
       try {
+        await speakStatus(PREPARING_MICROPHONE_MESSAGE);
+        if (cycleIdRef.current !== startCycleId) {
+          return;
+        }
+
         const recognitionStarted = audio.startManualRecognition();
         if (!recognitionStarted) {
           const message =
@@ -121,12 +128,11 @@ export function useSOSInteractionController({
 
         setModeState("listening", message);
         onStatus(message);
-        void speakStatus("Escuchando");
       } finally {
         operationLockedRef.current = false;
       }
     },
-    [audio, onStatus, setModeState, speakStatus],
+    [audio, nextCycle, onStatus, setModeState, speakStatus],
   );
 
   const executeVoiceCommand = useCallback(

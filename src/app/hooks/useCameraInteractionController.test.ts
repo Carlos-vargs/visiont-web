@@ -82,6 +82,62 @@ describe("useCameraInteractionController", () => {
     expect(result.current.mode).toBe("listening");
   });
 
+  it("speaks preparing feedback before opening recognition and input", async () => {
+    const order: string[] = [];
+    const audio = createAudio();
+    audio.speakText.mockImplementation(async (text: string) => {
+      order.push(`speak:${text}`);
+    });
+    audio.startManualRecognition.mockImplementation(() => {
+      order.push("recognition");
+      return true;
+    });
+    audio.startListening.mockImplementation(async () => {
+      order.push("input");
+      return true;
+    });
+    const { result } = createController(audio);
+
+    await act(async () => {
+      await result.current.handleMicPress();
+    });
+
+    expect(order).toEqual([
+      "speak:Preparando micrófono",
+      "recognition",
+      "input",
+    ]);
+  });
+
+  it("does not open the microphone if preparing is cancelled", async () => {
+    let resolvePreparing: () => void = () => {};
+    const audio = createAudio();
+    audio.speakText.mockImplementation((text: string) => {
+      if (text === "Preparando micrófono") {
+        return new Promise<void>((resolve) => {
+          resolvePreparing = resolve;
+        });
+      }
+      return Promise.resolve();
+    });
+    const { result } = createController(audio);
+
+    let startPromise: Promise<void> = Promise.resolve();
+    await act(async () => {
+      startPromise = result.current.handleMicPress();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await result.current.cancelCurrentInteraction();
+      resolvePreparing();
+      await startPromise;
+    });
+
+    expect(audio.startManualRecognition).not.toHaveBeenCalled();
+    expect(audio.startListening).not.toHaveBeenCalled();
+  });
+
   it("stops listening and analyzes with the captured transcript", async () => {
     const { result, audio, sendImageWithPrompt } = createController();
     audio.stopManualRecognition.mockReturnValue("de que color es la mochila");

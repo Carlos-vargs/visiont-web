@@ -56,7 +56,7 @@ describe("useVoiceInteractionController", () => {
     const first = result.current.handleMicPress();
     const second = result.current.handleMicPress();
 
-    expect(audio.startListening).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(audio.startListening).toHaveBeenCalledTimes(1));
 
     await act(async () => {
       resolveStart(true);
@@ -64,6 +64,28 @@ describe("useVoiceInteractionController", () => {
     });
 
     expect(result.current.mode).toBe("listening");
+  });
+
+  it("speaks preparing feedback before opening input", async () => {
+    const order: string[] = [];
+    const audio = createAudioMock();
+    audio.speakText.mockImplementation(async (text: string) => {
+      order.push(`speak:${text}`);
+    });
+    audio.startListening.mockImplementation(async () => {
+      order.push("input");
+      return true;
+    });
+
+    const { result } = renderHook(() =>
+      useVoiceInteractionController(createOptions({ audio })),
+    );
+
+    await act(async () => {
+      await result.current.handleMicPress();
+    });
+
+    expect(order).toEqual(["speak:Preparando micrófono", "input"]);
   });
 
   it("cancels loading work and ignores the stale response", async () => {

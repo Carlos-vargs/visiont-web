@@ -44,6 +44,7 @@ type UseVoiceInteractionControllerOptions = {
 
 const MICROPHONE_RECOVERY_MESSAGE =
   "El navegador no permitio abrir el microfono aunque ya estaba autorizado. Revisa ajustes o intenta recargar.";
+const PREPARING_MICROPHONE_MESSAGE = "Preparando micrófono";
 const IMAGE_REQUIRED_MESSAGE =
   "Necesito una imagen de la camara para responder eso. Activa la camara o captura una imagen primero.";
 const GENERAL_SCENE_PROMPT =
@@ -164,11 +165,17 @@ export function useVoiceInteractionController({
     }
 
     operationLockedRef.current = true;
-    cycleIdRef.current += 1;
-    setModeState("starting", "Preparando microfono...");
+    const cycleId = cycleIdRef.current + 1;
+    cycleIdRef.current = cycleId;
+    setModeState("starting", `${PREPARING_MICROPHONE_MESSAGE}...`);
     setErrorMessage(null);
 
     try {
+      await audio.speakText(PREPARING_MICROPHONE_MESSAGE);
+      if (!isCurrentCycle(cycleId)) {
+        return;
+      }
+
       const started = await audio.startListening();
       if (!started) {
         const message = audio.hasKnownMicrophoneAccess
@@ -183,7 +190,7 @@ export function useVoiceInteractionController({
     } finally {
       operationLockedRef.current = false;
     }
-  }, [audio, setModeState]);
+  }, [audio, isCurrentCycle, setModeState]);
 
   const publishAssistantResponse = useCallback(
     async (response: string, cycleId: number) => {
@@ -246,7 +253,7 @@ export function useVoiceInteractionController({
   }, [audio, sendUserText]);
 
   const cancelAndStartListening = useCallback(async () => {
-    await cancelCurrentInteraction("Preparando microfono...");
+    await cancelCurrentInteraction(`${PREPARING_MICROPHONE_MESSAGE}...`);
     await beginListening();
   }, [beginListening, cancelCurrentInteraction]);
 

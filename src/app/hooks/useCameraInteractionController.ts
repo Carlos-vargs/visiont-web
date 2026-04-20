@@ -50,6 +50,7 @@ type UseCameraInteractionControllerOptions = {
 
 const MICROPHONE_RECOVERY_MESSAGE =
   "El navegador no permitio abrir el microfono aunque ya estaba autorizado. Revisa ajustes o intenta recargar.";
+const PREPARING_MICROPHONE_MESSAGE = "Preparando micrófono";
 const SPEECH_RECOGNITION_UNSUPPORTED_MESSAGE =
   "Reconocimiento de voz no soportado en este navegador. Analizare la imagen sin transcripcion.";
 
@@ -181,11 +182,16 @@ export function useCameraInteractionController({
     operationLockedRef.current = true;
     const cycleId = cycleIdRef.current + 1;
     cycleIdRef.current = cycleId;
-    setModeState("starting", "Preparando microfono...");
+    setModeState("starting", `${PREPARING_MICROPHONE_MESSAGE}...`);
     setErrorMessage(null);
 
     try {
       audio.stopListening();
+      await audio.speakText(PREPARING_MICROPHONE_MESSAGE);
+      if (!isCurrentCycle(cycleId)) {
+        return;
+      }
+
       const recognitionStarted = audio.startManualRecognition();
 
       if (!recognitionStarted) {

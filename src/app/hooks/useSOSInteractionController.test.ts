@@ -68,6 +68,37 @@ describe("useSOSInteractionController", () => {
     expect(audio.startListening).toHaveBeenCalledTimes(1);
   });
 
+  it("speaks preparing feedback before opening recognition and input", async () => {
+    const order: string[] = [];
+    const audio = createAudioMock();
+    const speakStatus = vi.fn(async (text: string) => {
+      order.push(`speak:${text}`);
+    });
+    audio.startManualRecognition.mockImplementation(() => {
+      order.push("recognition");
+      return true;
+    });
+    audio.startListening.mockImplementation(async () => {
+      order.push("input");
+      return true;
+    });
+
+    const { result } = renderHook(() =>
+      useSOSInteractionController(createOptions({ audio, speakStatus })),
+    );
+
+    await act(async () => {
+      await result.current.handleMicPress();
+    });
+
+    expect(order).toEqual([
+      "speak:Preparando micrófono",
+      "recognition",
+      "input",
+    ]);
+    expect(speakStatus).not.toHaveBeenCalledWith("Escuchando");
+  });
+
   it("manual button during processing cancels and remains stable", async () => {
     let resolveProcess: () => void = () => {};
     const processTranscript = vi.fn(
