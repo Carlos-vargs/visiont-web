@@ -17,6 +17,8 @@ describe("useAudio", () => {
   beforeEach(() => {
     vi.useRealTimers();
     vi.clearAllMocks();
+    delete (window as any).SpeechRecognition;
+    delete (window as any).webkitSpeechRecognition;
     window.localStorage.clear();
     getUserMediaMock().mockResolvedValue(createMockStream());
     speechSynthesisMock().speak.mockImplementation((utterance: any) => {
@@ -132,5 +134,64 @@ describe("useAudio", () => {
     expect(spoken).toBe(true);
     expect(speechSynthesisMock().cancel).toHaveBeenCalled();
     expect(result.current.speechStatus).toBe("idle");
+  });
+
+  it("reports unsupported SpeechRecognition without entering a false listening state", () => {
+    const { result } = renderHook(() => useAudio());
+
+    let started = true;
+    act(() => {
+      started = result.current.startManualRecognition();
+    });
+
+    expect(started).toBe(false);
+    expect(result.current.recognitionStatus).toBe("unsupported");
+    expect(result.current.isManualListening).toBe(false);
+  });
+
+  it("ignores stale recognition callbacks after stopAllAudio", () => {
+    const instances: any[] = [];
+    class MockRecognition {
+      continuous = false;
+      interimResults = false;
+      lang = "";
+      maxAlternatives = 1;
+      onstart: (() => void) | null = null;
+      onresult: ((event: any) => void) | null = null;
+      onerror: ((event: any) => void) | null = null;
+      onend: (() => void) | null = null;
+      start = vi.fn(() => this.onstart?.());
+      stop = vi.fn();
+
+      constructor() {
+        instances.push(this);
+      }
+    }
+
+    (window as any).SpeechRecognition = MockRecognition;
+
+    const { result } = renderHook(() => useAudio());
+
+    act(() => {
+      expect(result.current.startManualRecognition()).toBe(true);
+    });
+
+    const recognition = instances[0];
+
+    act(() => {
+      result.current.stopAllAudio("test");
+      recognition.onresult?.({
+        resultIndex: 0,
+        results: [
+          {
+            0: { transcript: "comando viejo" },
+            isFinal: true,
+          },
+        ],
+      });
+    });
+
+    expect(result.current.transcript).toBe("");
+    expect(result.current.recognitionStatus).toBe("idle");
   });
 });

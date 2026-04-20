@@ -30,7 +30,7 @@ type UseVoiceInteractionControllerOptions = {
   cameraPreview: string | null;
   showCamera: boolean;
   captureFrame: () => string | null;
-  startCamera: () => Promise<boolean>;
+  startCamera: () => Promise<void>;
   stopCamera: () => void;
   setCameraPreview: (frame: string | null) => void;
   setShowCamera: (value: boolean) => void;
@@ -93,10 +93,15 @@ export function useVoiceInteractionController({
   const cameraCaptureTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  const cleanupDepsRef = useRef({ audio, cancelActiveRequest });
 
   useEffect(() => {
     modeRef.current = mode;
   }, [mode]);
+
+  useEffect(() => {
+    cleanupDepsRef.current = { audio, cancelActiveRequest };
+  }, [audio, cancelActiveRequest]);
 
   useEffect(() => {
     if (geminiError || cameraError || audio.error) {
@@ -292,12 +297,7 @@ export function useVoiceInteractionController({
         }
 
         setShowCamera(true);
-        const started = await startCamera();
-        if (!started) {
-          setErrorMessage(cameraError || "No pude activar la camara.");
-          setModeState("error", "Revisa permisos de camara");
-          return;
-        }
+        await startCamera();
 
         cameraCaptureTimerRef.current = setTimeout(() => {
           const frame = captureFrame();
@@ -379,9 +379,9 @@ export function useVoiceInteractionController({
       cameraCaptureTimerRef.current = null;
     }
     cycleIdRef.current += 1;
-    cancelActiveRequest();
-    audio.stopAllAudio("voice-unmount");
-  }, [audio, cancelActiveRequest]);
+    cleanupDepsRef.current.cancelActiveRequest();
+    cleanupDepsRef.current.audio.stopAllAudio("voice-unmount");
+  }, []);
 
   useEffect(() => cleanup, [cleanup]);
 
