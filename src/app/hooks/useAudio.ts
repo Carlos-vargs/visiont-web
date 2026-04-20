@@ -74,6 +74,10 @@ const SPEECH_PLAYBACK_ERROR_MESSAGE =
 const DEFAULT_RECOGNITION_LANGUAGE = "es-ES";
 const DEFAULT_SILENCE_TIMEOUT = 4000;
 const DEFAULT_SPEECH_TIMEOUT_MS = 12000;
+const MIN_SPEECH_CHUNK_TIMEOUT_MS = 6000;
+const MAX_SPEECH_CHUNK_TIMEOUT_MS = 22000;
+const SPEECH_CHARS_PER_SECOND = 12;
+const MAX_SPEECH_CHUNK_LENGTH = 220;
 const DEFAULT_WAKE_WORDS = [
   "analiza",
   "quiero que",
@@ -141,6 +145,90 @@ const resolveSpeechItem = (item: SpeechQueueItem | null) => {
 
   item.resolved = true;
   item.resolve();
+};
+
+const splitSpeechText = (text: string): string[] => {
+  const cleanText = text.replace(/\s+/g, " ").trim();
+  if (!cleanText) {
+    return [];
+  }
+
+  const sentenceParts =
+    cleanText.match(/[^.!?;:\n]+[.!?;:]?/g)?.map((part) => part.trim()) ?? [
+      cleanText,
+    ];
+  const chunks: string[] = [];
+  let current = "";
+
+  const pushLongPart = (part: string) => {
+    const words = part.split(/\s+/);
+    let buffer = "";
+
+    for (const word of words) {
+      const next = buffer ? `${buffer} ${word}` : word;
+      if (next.length > MAX_SPEECH_CHUNK_LENGTH && buffer) {
+        chunks.push(buffer);
+        buffer = word;
+      } else {
+        buffer = next;
+      }
+    }
+
+    if (buffer) {
+      chunks.push(buffer);
+    }
+  };
+
+  for (const part of sentenceParts) {
+    if (!part) {
+      continue;
+    }
+
+    if (part.length > MAX_SPEECH_CHUNK_LENGTH) {
+      if (current) {
+        chunks.push(current);
+        current = "";
+      }
+      pushLongPart(part);
+      continue;
+    }
+
+    const next = current ? `${current} ${part}` : part;
+    if (next.length > MAX_SPEECH_CHUNK_LENGTH && current) {
+      chunks.push(current);
+      current = part;
+    } else {
+      current = next;
+    }
+  }
+
+  if (current) {
+    chunks.push(current);
+  }
+
+  return chunks.length > 0 ? chunks : [cleanText];
+};
+
+const getSpeechChunkTimeoutMs = (text: string, overrideMs: number) => {
+  if (overrideMs !== DEFAULT_SPEECH_TIMEOUT_MS) {
+    return overrideMs;
+  }
+
+  const estimatedMs = (text.length / SPEECH_CHARS_PER_SECOND) * 1000 + 3000;
+  return Math.max(
+    MIN_SPEECH_CHUNK_TIMEOUT_MS,
+    Math.min(MAX_SPEECH_CHUNK_TIMEOUT_MS, Math.ceil(estimatedMs)),
+  );
+};
+
+const isIntentionalSpeechError = (event: any) => {
+  const error = String(event?.error || "").toLowerCase();
+  return (
+    error === "canceled" ||
+    error === "cancelled" ||
+    error === "interrupted" ||
+    error === "aborted"
+  );
 };
 
 const readMicrophonePermissionCache = (): MicrophonePermissionCache | null => {
@@ -1032,51 +1120,65 @@ export function useAudio(options: AudioOptions = {}) {
     ) {
       const item = speechQueueRef.current.shift()!;
       currentSpeechItemRef.current = item;
+      const speechChunks = splitSpeechText(item.text);
 
-      await new Promise<void>((innerResolve) => {
-        const utterance = new SpeechSynthesisUtterance(item.text);
-        let timeoutId: ReturnType<typeof setTimeout> | null = null;
+      for (const speechChunk of speechChunks) {
+        if (generation !== speechGenerationRef.current) {
+          break;
+        }
 
-        const finishUtterance = () => {
-          if (timeoutId) {
-            clearTimeout(timeoutId);
-            timeoutId = null;
-          }
-          if (currentUtteranceRef.current === utterance) {
-            currentUtteranceRef.current = null;
-          }
-          resolveSpeechItem(item);
-          innerResolve();
-        };
+        await new Promise<void>((innerResolve) => {
+          const utterance = new SpeechSynthesisUtterance(speechChunk);
+          let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
-        utterance.lang = "es-ES";
-        utterance.rate = 1.0;
-        utterance.pitch = 1.0;
+          const finishUtterance = () => {
+            if (timeoutId) {
+              clearTimeout(timeoutId);
+              timeoutId = null;
+            }
+            if (currentUtteranceRef.current === utterance) {
+              currentUtteranceRef.current = null;
+            }
+            innerResolve();
+          };
 
-        // Resolve the caller's outer promise when this utterance finishes
-        utterance.onend = finishUtterance;
-        utterance.onerror = () => {
-          setSpeechStatus("error");
-          setAudioError(SPEECH_PLAYBACK_ERROR_MESSAGE);
-          finishUtterance();
-        };
+          utterance.lang = "es-ES";
+          utterance.rate = 1.0;
+          utterance.pitch = 1.0;
 
-        // Voice selection deferred to speak time so voices are loaded
-        const voices = window.speechSynthesis.getVoices();
-        const spanish = voices.find(
-          (v) => v.lang.startsWith("es") || v.lang.includes("Spanish")
-        );
-        if (spanish) utterance.voice = spanish;
+          utterance.onend = finishUtterance;
+          utterance.onerror = (event) => {
+            if (
+              generation !== speechGenerationRef.current ||
+              isIntentionalSpeechError(event)
+            ) {
+              finishUtterance();
+              return;
+            }
 
-        currentUtteranceRef.current = utterance;
-        timeoutId = setTimeout(() => {
-          setSpeechStatus("error");
-          setAudioError(SPEECH_PLAYBACK_ERROR_MESSAGE);
-          window.speechSynthesis.cancel();
-          finishUtterance();
-        }, item.timeoutMs);
-        window.speechSynthesis.speak(utterance);
-      });
+            setSpeechStatus("error");
+            setAudioError(SPEECH_PLAYBACK_ERROR_MESSAGE);
+            finishUtterance();
+          };
+
+          const voices = window.speechSynthesis.getVoices();
+          const spanish = voices.find(
+            (v) => v.lang.startsWith("es") || v.lang.includes("Spanish")
+          );
+          if (spanish) utterance.voice = spanish;
+
+          currentUtteranceRef.current = utterance;
+          timeoutId = setTimeout(() => {
+            if (generation === speechGenerationRef.current) {
+              window.speechSynthesis.cancel();
+            }
+            finishUtterance();
+          }, getSpeechChunkTimeoutMs(speechChunk, item.timeoutMs));
+          window.speechSynthesis.speak(utterance);
+        });
+      }
+
+      resolveSpeechItem(item);
 
       if (currentSpeechItemRef.current === item) {
         currentSpeechItemRef.current = null;

@@ -136,6 +136,71 @@ describe("useAudio", () => {
     expect(result.current.speechStatus).toBe("idle");
   });
 
+  it("speaks long responses in ordered chunks without showing playback error", async () => {
+    const spokenTexts: string[] = [];
+    speechSynthesisMock().speak.mockImplementation((utterance: any) => {
+      spokenTexts.push(utterance.text);
+      setTimeout(() => utterance.onend?.(), 0);
+    });
+
+    const { result } = renderHook(() => useAudio());
+    const longText = [
+      "Esta es una respuesta amplia para explicar lo que esta ocurriendo frente al usuario.",
+      "La lectura debe avanzar por partes para que el navegador movil no corte toda la respuesta.",
+      "Tambien debe conservar el orden exacto de las frases y terminar sin mostrar errores falsos.",
+      "Cuando el texto es largo, cada fragmento tiene su propio tiempo de espera.",
+    ].join(" ");
+
+    await act(async () => {
+      await result.current.speakText(longText);
+    });
+
+    expect(spokenTexts.length).toBeGreaterThan(1);
+    expect(spokenTexts.join(" ")).toBe(longText);
+    expect(result.current.error).toBeNull();
+    expect(result.current.speechStatus).toBe("idle");
+  });
+
+  it("does not show playback error for intentional cancellation events", async () => {
+    let utteranceRef: any;
+    speechSynthesisMock().speak.mockImplementation((utterance: any) => {
+      utteranceRef = utterance;
+    });
+
+    const { result } = renderHook(() => useAudio());
+
+    let speechPromise: Promise<void> = Promise.resolve();
+    await act(async () => {
+      speechPromise = result.current.speakText("Respuesta en curso");
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      utteranceRef.onerror?.({ error: "interrupted" });
+      await speechPromise;
+    });
+
+    expect(result.current.error).toBeNull();
+    expect(result.current.speechStatus).toBe("idle");
+  });
+
+  it("shows playback error for real speech synthesis failures", async () => {
+    speechSynthesisMock().speak.mockImplementation((utterance: any) => {
+      setTimeout(() => utterance.onerror?.({ error: "synthesis-failed" }), 0);
+    });
+
+    const { result } = renderHook(() => useAudio());
+
+    await act(async () => {
+      await result.current.speakText("Respuesta");
+    });
+
+    expect(result.current.error).toBe(
+      "No pude reproducir la respuesta hablada. Puedes leerla en pantalla.",
+    );
+    expect(result.current.speechStatus).toBe("idle");
+  });
+
   it("reports unsupported SpeechRecognition without entering a false listening state", () => {
     const { result } = renderHook(() => useAudio());
 
