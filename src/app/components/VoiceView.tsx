@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState } from "react";
 import { AppHeader } from "./AppHeader";
 import { TopNav } from "./TopNav";
 import { Mic, MicOff, Volume2, Camera } from "lucide-react";
@@ -7,44 +7,12 @@ import { AudioWave } from "./AudioWave";
 import { useGemini } from "../hooks/useGemini";
 import { useAudio } from "../hooks/useAudio";
 import { useCamera } from "../hooks/useCamera";
+import { useVoiceInteractionController } from "../hooks/useVoiceInteractionController";
 import { FeedbackModal } from "./FeedbackModal";
 
-const PROFILE_IMAGE =
-  "https://images.unsplash.com/photo-1577565177023-d0f29c354b69?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxwZXJzb24lMjBwb3J0cmFpdCUyMGNsb3NlJTIwdXAlMjBwcm9maWxlfGVufDF8fHx8MTc3NTUyODg1Mnww&ixlib=rb-4.1.0&q=80&w=400";
-const MICROPHONE_RECOVERY_MESSAGE =
-  "El navegador no permitio abrir el microfono aunque ya estaba autorizado. Revisa ajustes o intenta recargar.";
-const GENERAL_SCENE_PROMPT =
-  "Solicitud del usuario: \"¿Qué hay frente a mí?\". Describe brevemente los objetos principales frente al usuario, personas, obstaculos y texto visible importante. Proporciona distancias aproximadas si son utiles.";
-const READ_TEXT_PROMPT =
-  "Solicitud del usuario: \"Lee el texto visible en la imagen\". Transcribe directamente el texto visible. No describas el entorno salvo que ayude a ubicar el texto o exista una alerta critica.";
-const IMAGE_REQUIRED_MESSAGE =
-  "Necesito una imagen de la camara para responder eso. Activa la camara o captura una imagen primero.";
-
-const isAbortLikeError = (error: unknown) => {
-  const err = error as { name?: string; message?: string };
-  return err?.name === "AbortError" || /abort/i.test(err?.message || "");
-};
-
 export function VoiceView() {
-  const [isListening, setIsListening] = useState(false);
-  const [isSpeaking, setIsSpeaking] = useState(false);
-  const [messages, setMessages] = useState<
-    Array<{ id: number; text: string; sender: "assistant" | "user" }>
-  >([
-    {
-      id: 0,
-      text: "Hola, estoy listo para ayudarte. ¿Qué necesitas?",
-      sender: "assistant",
-    },
-  ]);
-  const [showFeedback, setShowFeedback] = useState(false);
-  const [feedbackText, setFeedbackText] = useState("");
-  const [cameraEnabled, setCameraEnabled] = useState(false);
   const [showCamera, setShowCamera] = useState(false);
   const [cameraPreview, setCameraPreview] = useState<string | null>(null);
-
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
 
   // Hooks
   const {
@@ -55,17 +23,7 @@ export function VoiceView() {
     cancelActiveRequest,
   } = useGemini();
 
-  const {
-    isListening: audioListening,
-    isSpeaking: audioSpeaking,
-    error: audioError,
-    audioLevel,
-    hasKnownMicrophoneAccess,
-    startListening,
-    stopListening,
-    speakText,
-    cancelSpeech,
-  } = useAudio({
+  const audio = useAudio({
     sendSampleRate: 16000,
     enableEchoCancellation: true,
   });
@@ -83,182 +41,26 @@ export function VoiceView() {
     facingMode: "environment",
   });
 
-  const isActive = audioListening || audioSpeaking;
-
-  const interruptAndStartListening = useCallback(async () => {
-    cancelActiveRequest();
-    stopListening();
-    cancelSpeech();
-    setIsListening(false);
-    await speakText("Cancelando");
-
-    const started = await startListening();
-    if (!started) {
-      if (hasKnownMicrophoneAccess) void speakText(MICROPHONE_RECOVERY_MESSAGE);
-      return;
-    }
-    setIsListening(true);
-  }, [
-    cancelActiveRequest,
-    cancelSpeech,
-    hasKnownMicrophoneAccess,
-    speakText,
-    startListening,
-    stopListening,
-  ]);
-
-  // Handle mic press
-  const handleMicPress = useCallback(async () => {
-    if (isListening) {
-      // Stop listening and send audio to Gemini
-      stopListening();
-      setIsListening(false);
-
-      // For now, simulate with text input
-      // In a full implementation, we'd convert the recorded audio to text
-      const userText = "¿Qué hay frente a mí?";
-      setMessages((prev) => [
-        ...prev,
-        { id: Date.now(), text: userText, sender: "user" },
-      ]);
-
-      // Get response from Gemini
-      try {
-        const response = await sendTextMessage(userText);
-        setMessages((prev) => [
-          ...prev,
-          { id: Date.now() + 1, text: response, sender: "assistant" },
-        ]);
-        setFeedbackText(response);
-        setShowFeedback(true);
-
-        // Speak the response
-        speakText(response);
-      } catch (err) {
-        if (!isAbortLikeError(err)) {
-          console.error("Error getting Gemini response:", err);
-        }
-      }
-    } else {
-      if (audioSpeaking || geminiLoading) {
-        await interruptAndStartListening();
-        return;
-      }
-
-      const started = await startListening();
-      if (!started) {
-        if (hasKnownMicrophoneAccess) void speakText(MICROPHONE_RECOVERY_MESSAGE);
-        return;
-      }
-      setIsListening(true);
-    }
-  }, [
-    isListening,
-    audioSpeaking,
+  const controller = useVoiceInteractionController({
+    audio,
     geminiLoading,
-    hasKnownMicrophoneAccess,
-    interruptAndStartListening,
-    startListening,
-    stopListening,
+    geminiError,
+    cameraError,
+    cameraPreview,
+    showCamera,
+    captureFrame,
+    startCamera,
+    stopCamera,
+    setCameraPreview,
+    setShowCamera,
     sendTextMessage,
-    speakText,
-  ]);
-
-  // Quick action handlers
-  const handleQuickAction = useCallback(
-    async (action: string) => {
-      if (action === "camera") {
-        // Toggle camera preview
-        if (showCamera) {
-          setShowCamera(false);
-          stopCamera();
-        } else {
-          setShowCamera(true);
-          await startCamera();
-
-          // Capture a frame after camera is ready
-          setTimeout(() => {
-            const frame = captureFrame();
-            if (frame) {
-              setCameraPreview(frame);
-            }
-          }, 1000);
-        }
-        return;
-      }
-
-      // Text-based quick actions
-      const userText = action;
-      setMessages((prev) => [
-        ...prev,
-        { id: Date.now(), text: userText, sender: "user" },
-      ]);
-
-      try {
-        let response: string;
-
-        if (action === "¿Qué hay frente a mí?") {
-          const imageForPrompt = cameraPreview ?? captureFrame();
-          if (!imageForPrompt) {
-            response = IMAGE_REQUIRED_MESSAGE;
-          } else {
-            const imageResponse = await sendImageWithPrompt(
-              imageForPrompt,
-              GENERAL_SCENE_PROMPT,
-            );
-            response = imageResponse.feedback;
-          }
-        } else if (action === "Lee el texto visible en la imagen") {
-          const imageForPrompt = cameraPreview ?? captureFrame();
-          if (!imageForPrompt) {
-            response = IMAGE_REQUIRED_MESSAGE;
-          } else {
-            const imageResponse = await sendImageWithPrompt(
-              imageForPrompt,
-              READ_TEXT_PROMPT,
-            );
-            response = imageResponse.feedback;
-          }
-        } else {
-          response = await sendTextMessage(userText);
-        }
-
-        setMessages((prev) => [
-          ...prev,
-          { id: Date.now() + 1, text: response, sender: "assistant" },
-        ]);
-        setFeedbackText(response);
-        setShowFeedback(true);
-
-        // Speak the response
-        speakText(response);
-      } catch (err) {
-        if (!isAbortLikeError(err)) {
-          console.error("Error getting Gemini response:", err);
-        }
-      }
-    },
-    [
-      showCamera,
-      cameraPreview,
-      startCamera,
-      stopCamera,
-      captureFrame,
-      sendImageWithPrompt,
-      sendTextMessage,
-      speakText,
-    ],
-  );
-
-  const handleSpeakFeedback = useCallback(() => {
-    if (feedbackText) {
-      speakText(feedbackText);
-    }
-  }, [feedbackText, speakText]);
+    sendImageWithPrompt,
+    cancelActiveRequest,
+  });
 
   return (
     <>
-      <AppHeader profileImage={PROFILE_IMAGE} />
+      <AppHeader />
       <div
         className="flex flex-col flex-1 overflow-hidden pb-20"
         style={{ background: "#F8FAFC" }}
@@ -266,7 +68,7 @@ export function VoiceView() {
         {/* Status pills */}
         <div className="flex items-center justify-center gap-2 px-5 pt-3 pb-1">
           <AnimatePresence mode="wait">
-            {audioListening && (
+            {controller.isListening && (
               <motion.div
                 key="listening"
                 initial={{ opacity: 0, scale: 0.85 }}
@@ -283,7 +85,7 @@ export function VoiceView() {
                 </span>
               </motion.div>
             )}
-            {audioSpeaking && !audioListening && (
+            {controller.isSpeaking && !controller.isListening && (
               <motion.div
                 key="speaking"
                 initial={{ opacity: 0, scale: 0.85 }}
@@ -300,7 +102,7 @@ export function VoiceView() {
                 </span>
               </motion.div>
             )}
-            {!audioListening && !audioSpeaking && (
+            {!controller.isListening && !controller.isSpeaking && (
               <motion.div
                 key="idle"
                 initial={{ opacity: 0 }}
@@ -319,6 +121,16 @@ export function VoiceView() {
             )}
           </AnimatePresence>
         </div>
+        <p
+          className="sr-only"
+          aria-live={
+            controller.mode === "error" || controller.mode === "cancelling"
+              ? "assertive"
+              : "polite"
+          }
+        >
+          {controller.statusMessage}
+        </p>
 
         {/* Camera preview (when enabled) */}
         {showCamera && (
@@ -360,9 +172,13 @@ export function VoiceView() {
         {/* Wave visualizer card */}
         <div className="mx-5 mt-2 bg-white rounded-3xl shadow-sm border border-gray-100 p-4">
           <AudioWave
-            isActive={isActive}
+            isActive={controller.isActive}
             color={
-              audioListening ? "#3B82F6" : audioSpeaking ? "#10B981" : "#CBD5E1"
+              controller.isListening
+                ? "#3B82F6"
+                : controller.isSpeaking
+                  ? "#10B981"
+                  : "#CBD5E1"
             }
           />
         </div>
@@ -370,7 +186,7 @@ export function VoiceView() {
         {/* Chat messages */}
         <div className="flex-1 overflow-y-auto px-5 py-3 flex flex-col justify-end gap-2">
           <AnimatePresence initial={false}>
-            {messages.slice(-4).map((msg) => (
+            {controller.messages.slice(-4).map((msg) => (
               <motion.div
                 key={msg.id}
                 initial={{ opacity: 0, y: 16, scale: 0.97 }}
@@ -415,29 +231,32 @@ export function VoiceView() {
         {/* Mic button */}
         <div className="flex flex-col items-center pb-6 pt-2">
           <p style={{ fontSize: "12px" }} className="text-gray-400 mb-3">
-            {isListening ? "Toca para enviar" : "Toca para hablar"}
+            {controller.isListening ? "Toca para enviar" : "Toca para hablar"}
           </p>
 
           {/* Neumorphic mic button */}
           <motion.button
             whileTap={{ scale: 0.93 }}
-            onClick={handleMicPress}
-            aria-label={isListening ? "Detener escucha" : "Activar micrófono"}
-            aria-pressed={isListening}
+            onClick={controller.handleMicPress}
+            aria-label={
+              controller.isListening ? "Detener escucha" : "Activar micrófono"
+            }
+            aria-pressed={controller.isListening}
+            disabled={controller.mode === "starting" || controller.mode === "cancelling"}
             className="relative flex items-center justify-center rounded-full transition-all duration-200 focus:outline-none focus-visible:ring-4 focus-visible:ring-blue-400"
             style={{
               width: 80,
               height: 80,
-              background: isListening
+              background: controller.isListening
                 ? "linear-gradient(145deg, #3B82F6, #2563EB)"
                 : "#F1F5F9",
-              boxShadow: isListening
+              boxShadow: controller.isListening
                 ? "0 8px 24px rgba(59,130,246,0.45), inset 0 1px 0 rgba(255,255,255,0.2)"
                 : "8px 8px 16px #d1d9e0, -8px -8px 16px #ffffff",
             }}
           >
             {/* Pulse rings when listening */}
-            {isListening && (
+            {controller.isListening && (
               <>
                 <motion.div
                   className="absolute inset-0 rounded-full bg-blue-400"
@@ -461,7 +280,7 @@ export function VoiceView() {
               </>
             )}
 
-            {isListening ? (
+            {controller.isListening ? (
               <MicOff
                 size={30}
                 className="text-white relative z-10"
@@ -495,7 +314,8 @@ export function VoiceView() {
             ].map((chip) => (
               <button
                 key={chip.action}
-                onClick={() => handleQuickAction(chip.action)}
+                onClick={() => controller.handleQuickAction(chip.action)}
+                disabled={controller.mode === "starting" || controller.mode === "cancelling"}
                 className="bg-white border border-gray-200 rounded-2xl px-3 py-1.5 text-slate-600 shadow-sm active:bg-gray-50 transition-colors"
                 style={{ fontSize: "12px" }}
                 aria-label={chip.label}
@@ -507,10 +327,13 @@ export function VoiceView() {
         </div>
 
         {/* Error messages */}
-        {(audioError || geminiError || cameraError) && (
-          <div className="mx-5 mb-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2">
+        {controller.errorMessage && (
+          <div
+            className="mx-5 mb-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2"
+            aria-live="assertive"
+          >
             <p style={{ fontSize: "11px" }} className="text-red-600">
-              {audioError || geminiError || cameraError}
+              {controller.errorMessage}
             </p>
           </div>
         )}
@@ -518,11 +341,11 @@ export function VoiceView() {
 
       {/* Feedback Modal */}
       <FeedbackModal
-        isOpen={showFeedback}
-        onClose={() => setShowFeedback(false)}
-        feedback={feedbackText}
-        onSpeak={handleSpeakFeedback}
-        isLoading={geminiLoading}
+        isOpen={controller.showFeedback}
+        onClose={() => controller.setShowFeedback(false)}
+        feedback={controller.feedbackText}
+        onSpeak={controller.handleSpeakFeedback}
+        isLoading={controller.isLoading}
       />
 
       <TopNav />

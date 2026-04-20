@@ -16,6 +16,7 @@ import {
   BookUser,
 } from "lucide-react";
 import { useAudio } from "../hooks/useAudio";
+import { useSOSInteractionController } from "../hooks/useSOSInteractionController";
 import { useContactPicker, type Contact } from "../hooks/useContactPicker";
 
 const initialContacts: Contact[] = [
@@ -29,8 +30,6 @@ const initialContacts: Contact[] = [
   },
 ];
 
-const MICROPHONE_RECOVERY_MESSAGE =
-  "El navegador no permitio abrir el microfono aunque ya estaba autorizado. Revisa ajustes o intenta recargar.";
 const SOS_WAKE_WORDS = [
   "ayuda",
   "emergencia",
@@ -144,30 +143,15 @@ export function SOSView() {
   const [manualPhone, setManualPhone] = useState("");
   const [voiceStatus, setVoiceStatus] = useState("");
   const [showManualInput, setShowManualInput] = useState(false);
-  const [isListening, setIsListening] = useState(false);
-  const [isProcessingVoice, setIsProcessingVoice] = useState(false);
 
   // Refs para evitar stale closures en callbacks asíncronos (Patrón CameraView)
-  const isSpeakingRef = useRef(false);
-  const isListeningRef = useRef(false);
-  const isProcessingVoiceRef = useRef(false);
   const speechStatusIdRef = useRef(0);
   const voiceCommandCycleRef = useRef(0);
   const contactsRef = useRef<Contact[]>(initialContacts);
   const sosActiveRef = useRef(sosActive);
   const pendingCallNameRef = useRef<string | null>(null);
-  const executeVoiceCommandRef = useRef<
-    ((transcript?: string) => Promise<void>) | null
-  >(null);
-  const startVoiceListeningRef = useRef<(() => Promise<void>) | null>(null);
 
   // Sincronizar refs con estados
-  useEffect(() => {
-    isListeningRef.current = isListening;
-  }, [isListening]);
-  useEffect(() => {
-    isProcessingVoiceRef.current = isProcessingVoice;
-  }, [isProcessingVoice]);
   useEffect(() => {
     sosActiveRef.current = sosActive;
   }, [sosActive]);
@@ -194,24 +178,16 @@ export function SOSView() {
     onError: (message) => setVoiceStatus(message),
   });
 
-  const {
-    isSpeaking: audioSpeaking,
-    error: audioError,
-    audioLevel,
-    hasKnownMicrophoneAccess,
-    isBackgroundListening,
-    transcript: userTranscript,
-    startListening: startAudioListening,
-    stopListening: stopAudioListening,
-    startBackgroundRecognition,
-    stopBackgroundRecognition,
-    resetRecognition,
-    speakText,
-    cancelSpeech,
-  } = useAudio({
+  const audio = useAudio({
     sendSampleRate: 16000,
     enableEchoCancellation: true,
   });
+  const {
+    error: audioError,
+    transcript: userTranscript,
+    speakText,
+    cancelSpeech,
+  } = audio;
 
   const contacts = mergeContacts(
     initialContacts,
@@ -228,13 +204,10 @@ export function SOSView() {
       const speechStatusId = speechStatusIdRef.current + 1;
       speechStatusIdRef.current = speechStatusId;
       cancelSpeech();
-      isSpeakingRef.current = true;
       try {
         await speakText(text);
       } finally {
-        if (speechStatusIdRef.current === speechStatusId) {
-          isSpeakingRef.current = false;
-        }
+        if (speechStatusIdRef.current !== speechStatusId) return;
       }
     },
     [cancelSpeech, speakText],
@@ -453,122 +426,21 @@ export function SOSView() {
     ],
   );
 
-  // executeVoiceCommand - analogo a executeSingleAnalysis en CameraView
-  const executeVoiceCommand = useCallback(
-    async (transcript?: string) => {
-      if (isProcessingVoiceRef.current) {
-        console.warn("Voice command already in progress, ignoring request");
-        return;
-      }
-      const commandCycleId = voiceCommandCycleRef.current + 1;
-      voiceCommandCycleRef.current = commandCycleId;
-      isProcessingVoiceRef.current = true;
-      setIsProcessingVoice(true);
-      setIsListening(false);
-      stopAudioListening();
-
-      void speakStatus("Procesando");
-
-      try {
-        if (transcript?.trim()) {
-          await handleVoiceCommand(transcript, commandCycleId);
-        } else {
-          const message =
-            "No escuche un comando. Puedes decir llama a mama o activa emergencia.";
-          if (voiceCommandCycleRef.current === commandCycleId) {
-            setVoiceStatus(message);
-            void speakStatus(message);
-          }
-        }
-        if (voiceCommandCycleRef.current === commandCycleId) {
-          resetRecognition();
-        }
-      } catch (err: any) {
-        console.error("Error processing voice command:", err);
-        if (voiceCommandCycleRef.current === commandCycleId) {
-          resetRecognition();
-        }
-      } finally {
-        if (voiceCommandCycleRef.current === commandCycleId) {
-          isProcessingVoiceRef.current = false;
-          setIsProcessingVoice(false);
-        }
-      }
-    },
-    [handleVoiceCommand, resetRecognition, speakStatus, stopAudioListening],
-  );
-
-  // Ref assignments para callbacks seguros
-  useEffect(() => {
-    executeVoiceCommandRef.current = executeVoiceCommand;
-  }, [executeVoiceCommand]);
-
-  // startVoiceListening - mismo patron que CameraView
-  const startVoiceListening = useCallback(async () => {
-    const started = await startAudioListening();
-    if (!started) {
-      if (hasKnownMicrophoneAccess) void speakStatus(MICROPHONE_RECOVERY_MESSAGE);
-      return;
-    }
-    setIsListening(true);
-    void speakStatus("Escuchando");
-  }, [hasKnownMicrophoneAccess, speakStatus, startAudioListening]);
-
-  useEffect(() => {
-    startVoiceListeningRef.current = startVoiceListening;
-  }, [startVoiceListening]);
-
-  const interruptAndStartListening = useCallback(async () => {
-    voiceCommandCycleRef.current += 1;
-    stopAudioListening();
-    isProcessingVoiceRef.current = false;
-    setIsProcessingVoice(false);
-    setIsListening(false);
-    resetRecognition();
-
-    await speakStatus("Cancelando");
-
-    const started = await startAudioListening();
-    if (!started) {
-      if (hasKnownMicrophoneAccess) void speakStatus(MICROPHONE_RECOVERY_MESSAGE);
-      return;
-    }
-    setIsListening(true);
-  }, [
-    hasKnownMicrophoneAccess,
-    resetRecognition,
+  const sosController = useSOSInteractionController({
+    audio,
+    wakeWords: SOS_WAKE_WORDS,
+    silenceTimeout: 4000,
+    processTranscript: handleVoiceCommand,
     speakStatus,
-    startAudioListening,
-    stopAudioListening,
-  ]);
-
-  // Iniciar escucha en background al montar
-  useEffect(() => {
-    // Pequeño delay para asegurar inicialización correcta
-    const timer = setTimeout(() => {
-      startBackgroundRecognition({
-        wakeWords: SOS_WAKE_WORDS,
-        silenceTimeout: 4000,
-        onActivation: () => {
-          console.log("Wake word detected, activating microphone...");
-          if (!isListeningRef.current && !isProcessingVoiceRef.current) {
-            startVoiceListeningRef.current?.();
-          }
-        },
-        onSilence: (transcript: string) => {
-          console.log("Silence detected, processing transcript:", transcript);
-          if (isListeningRef.current) {
-            executeVoiceCommandRef.current?.(transcript);
-          }
-        },
-      });
-    }, 500);
-    return () => {
-      clearTimeout(timer);
-      stopBackgroundRecognition();
-      cancelSpeech();
-    };
-  }, [cancelSpeech, startBackgroundRecognition, stopBackgroundRecognition]);
+    onStatus: setVoiceStatus,
+    onBeforeManualStart: () => {
+      clearContactPickerError();
+      setShowManualInput(false);
+    },
+    onCycleChange: (cycleId) => {
+      voiceCommandCycleRef.current = cycleId;
+    },
+  });
 
   // Sincronizar contactos cuando hay permiso
   useEffect(() => {
@@ -592,46 +464,6 @@ export function SOSView() {
       console.log("[Voice Transcript]", userTranscript);
     }
   }, [userTranscript]);
-
-  // handleMicPress - mismo patron de 3 estados que CameraView
-  const handleMicPress = useCallback(async () => {
-    clearContactPickerError();
-    setShowManualInput(false);
-
-    // Estado 1: Escuchando -> DETENER Y PROCESAR
-    if (isListening) {
-      stopAudioListening();
-      setIsListening(false);
-      await executeVoiceCommand();
-      return;
-    }
-
-    // Estado 2: Procesando/hablando -> CANCELAR Y PRIORIZAR NUEVA ESCUCHA
-    if (isProcessingVoice || audioSpeaking || isSpeakingRef.current) {
-      await interruptAndStartListening();
-      return;
-    }
-
-    // Estado 3: Idle -> INICIAR ESCUCHA
-    const started = await startAudioListening();
-    if (!started) {
-      if (hasKnownMicrophoneAccess) void speakStatus(MICROPHONE_RECOVERY_MESSAGE);
-      return;
-    }
-    setIsListening(true);
-    void speakStatus("Escuchando, toca para procesar");
-  }, [
-    clearContactPickerError,
-    executeVoiceCommand,
-    audioSpeaking,
-    interruptAndStartListening,
-    hasKnownMicrophoneAccess,
-    isListening,
-    isProcessingVoice,
-    speakStatus,
-    startAudioListening,
-    stopAudioListening,
-  ]);
 
   const handleEnableContacts = useCallback(async () => {
     clearContactPickerError();
@@ -702,6 +534,7 @@ export function SOSView() {
                     ? "border border-red-200 bg-red-50"
                     : "border border-blue-200 bg-blue-50"
                 }`}
+                aria-live={contactPickerError ? "assertive" : "polite"}
               >
                 <p
                   style={{ fontSize: "12px" }}
@@ -1024,30 +857,30 @@ export function SOSView() {
 
         {/* Mic button - mismo patron de 3 estados que CameraView */}
         <div
-          onClick={() => void handleMicPress()}
+          onClick={() => void sosController.handleMicPress()}
           className="flex flex-col fixed bottom-0 w-full items-center pb-6 pt-2 pointer-events-none"
         >
           <p
             style={{ fontSize: "12px" }}
             className="text-gray-400 mb-3 pointer-events-auto"
           >
-            {isProcessingVoice
+            {sosController.isProcessingVoice
               ? "Procesando... Toca para cancelar"
-              : isListening
+              : sosController.isListening
                 ? "Escuchando... Toca para procesar"
-                : isBackgroundListening
+                : sosController.isBackgroundListening
                   ? "Di 'llama a mama' o toca para hablar"
                   : "Toca para habilitar comandos de voz"}
           </p>
 
           {/* Indicador de nivel de audio cuando escucha */}
-          {isListening && (
+          {sosController.isListening && sosController.hasRealAudioLevel && (
             <div className="mb-2 bg-black/50 backdrop-blur-sm rounded-full px-3 py-1.5 flex items-center gap-2 pointer-events-none">
               <Mic size={12} className="text-blue-400" />
               <div className="w-16 h-1.5 bg-white/20 rounded-full overflow-hidden">
                 <div
                   className="h-full bg-blue-400 transition-all duration-100"
-                  style={{ width: `${audioLevel * 100}%` }}
+                  style={{ width: `${sosController.audioLevel * 100}%` }}
                 />
               </div>
             </div>
@@ -1056,30 +889,36 @@ export function SOSView() {
           <motion.button
             whileTap={{ scale: 0.93 }}
             aria-label={
-              isProcessingVoice
+              sosController.isProcessingVoice
                 ? "Cancelar procesamiento"
-                : isListening
+                : sosController.isListening
                   ? "Detener y procesar"
                   : "Activar microfono"
             }
-            aria-pressed={isListening || isProcessingVoice}
+            aria-pressed={
+              sosController.isListening || sosController.isProcessingVoice
+            }
+            disabled={
+              sosController.mode === "starting" ||
+              sosController.mode === "cancelling"
+            }
             className="pointer-events-auto relative flex items-center justify-center rounded-full transition-all duration-200 focus:outline-none focus-visible:ring-4 focus-visible:ring-blue-400"
             style={{
               width: 72,
               height: 72,
-              background: isProcessingVoice
+              background: sosController.isProcessingVoice
                 ? "linear-gradient(145deg, #F59E0B, #D97706)"
-                : isListening
+                : sosController.isListening
                   ? "linear-gradient(145deg, #3B82F6, #2563EB)"
                   : "#F1F5F9",
-              boxShadow: isProcessingVoice
+              boxShadow: sosController.isProcessingVoice
                 ? "0 8px 24px rgba(245,158,11,0.45), inset 0 1px 0 rgba(255,255,255,0.2)"
-                : isListening
+                : sosController.isListening
                   ? "0 8px 24px rgba(59,130,246,0.45), inset 0 1px 0 rgba(255,255,255,0.2)"
                   : "8px 8px 16px #d1d9e0, -8px -8px 16px #ffffff",
             }}
           >
-            {(isListening || isProcessingVoice) && (
+            {(sosController.isListening || sosController.isProcessingVoice) && (
               <>
                 <motion.div
                   className="absolute inset-0 rounded-full bg-white/30"
@@ -1103,11 +942,13 @@ export function SOSView() {
               </>
             )}
 
-            {isBackgroundListening && !isListening && !isProcessingVoice && (
+            {sosController.isBackgroundListening &&
+              !sosController.isListening &&
+              !sosController.isProcessingVoice && (
               <div className="absolute -right-1 -top-1 h-3 w-3 rounded-full border-2 border-white bg-green-400 animate-pulse" />
             )}
 
-            {isProcessingVoice ? (
+            {sosController.isProcessingVoice ? (
               <svg
                 width="28"
                 height="28"
@@ -1122,7 +963,7 @@ export function SOSView() {
                 <line x1="18" y1="6" x2="6" y2="18" />
                 <line x1="6" y1="6" x2="18" y2="18" />
               </svg>
-            ) : isListening ? (
+            ) : sosController.isListening ? (
               <MicOff
                 size={28}
                 className="text-white relative z-10"
@@ -1139,10 +980,13 @@ export function SOSView() {
           </motion.button>
         </div>
 
-        {audioError && (
-          <div className="mx-4 mt-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2">
+        {(audioError || sosController.errorMessage) && (
+          <div
+            className="mx-4 mt-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2"
+            aria-live="assertive"
+          >
             <p style={{ fontSize: "11px" }} className="text-red-600">
-              {audioError}
+              {sosController.errorMessage || audioError}
             </p>
           </div>
         )}

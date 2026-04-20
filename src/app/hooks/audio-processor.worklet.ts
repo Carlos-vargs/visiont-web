@@ -1,3 +1,13 @@
+declare class AudioWorkletProcessor {
+  readonly port: MessagePort;
+  constructor();
+}
+
+declare function registerProcessor(
+  name: string,
+  processorCtor: typeof AudioWorkletProcessor,
+): void;
+
 export class AudioProcessor extends AudioWorkletProcessor {
   private chunkSize: number;
   private buffer: Float32Array;
