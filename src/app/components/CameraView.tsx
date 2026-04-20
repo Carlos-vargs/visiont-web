@@ -1,60 +1,26 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { AppHeader } from "./AppHeader";
 import { TopNav } from "./TopNav";
 import { motion, AnimatePresence } from "motion/react";
-import { Flashlight, ZoomIn, Info, Mic, MicOff } from "lucide-react";
+import { Flashlight, ZoomIn, Mic, MicOff } from "lucide-react";
 import { useCamera } from "../hooks/useCamera";
 import { useAudio } from "../hooks/useAudio";
+import { useCameraInteractionController } from "../hooks/useCameraInteractionController";
 import { useGemini } from "../hooks/useGemini";
 
-type BoundingBox = {
-  id: number;
-  label: string;
-  distance: string;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  confidence: number;
-};
-
-type DetectionResult = {
-  label: string;
-  distance: string;
-  confidence: number;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-};
-
 const isDevelopment = import.meta.env.VITE_ENVIRONMENT !== "production";
-const MICROPHONE_RECOVERY_MESSAGE =
-  "El navegador no permitio abrir el microfono aunque ya estaba autorizado. Revisa ajustes o intenta recargar.";
-const SPEECH_RECOGNITION_UNSUPPORTED_MESSAGE =
-  "Reconocimiento de voz no soportado en este navegador";
 
 export function CameraView() {
   // ─── State ───────────────────────────────────────────────────────────────────
 
-  const [activeBoxes, setActiveBoxes] = useState<BoundingBox[]>([]);
   const [scanning, setScanning] = useState(true);
   const [scanLine, setScanLine] = useState(0);
-  const [showFeedback, setShowFeedback] = useState(false);
-  const [feedbackText, setFeedbackText] = useState("");
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [isListening, setIsListening] = useState(false);
-
-  const abortControllerRef = useRef<AbortController | null>(null);
-  const captureTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isAnalysisInProgressRef = useRef(false);
 
   // ─── Hooks ────────────────────────────────────────────────────────────────────
 
   const {
     isActive: cameraActive,
     error: cameraError,
-    permissionGranted: cameraPermission,
     flashAvailable,
     flashOn,
     videoRef,
@@ -69,30 +35,45 @@ export function CameraView() {
     frameRate: 30,
   });
 
-  const {
-    isSpeaking: audioSpeaking,
-    error: audioError,
-    audioLevel,
-    hasKnownMicrophoneAccess,
-    transcript: userTranscript,
-    startListening: startAudioListening,
-    stopListening: stopAudioListening,
-    startManualRecognition,
-    stopManualRecognition,
-    pauseRecognition,
-    resumeRecognition,
-    resetRecognition,
-    speakText,
-    cancelSpeech,
-  } = useAudio({ sendSampleRate: 16000, enableEchoCancellation: true });
+  const audio = useAudio({
+    sendSampleRate: 16000,
+    enableEchoCancellation: true,
+  });
 
   const {
-    isConnected: geminiConnected,
-    isLoading: geminiLoading,
     error: geminiError,
     sendImageWithPrompt,
     cancelActiveRequest,
   } = useGemini();
+
+  const {
+    mode,
+    transcript: userTranscript,
+    audioLevel,
+    hasRealAudioLevel,
+    statusMessage,
+    errorMessage,
+    activeBoxes,
+    handleMicPress,
+    cleanup: cleanupInteraction,
+  } = useCameraInteractionController({
+    audio,
+    captureFrame,
+    sendImageWithPrompt,
+    cancelActiveRequest,
+  });
+
+  const isListening = mode === "starting" || mode === "listening";
+  const isAnalyzing =
+    mode === "analyzing" || mode === "speaking" || mode === "cancelling";
+  const buttonDisabled = mode === "starting" || mode === "cancelling";
+  const isCancelling = mode === "cancelling";
+  const displayError =
+    cameraError ||
+    errorMessage ||
+    audio.lastAudioError ||
+    audio.error ||
+    geminiError;
 
   // ─── Debug transcript log ─────────────────────────────────────────────────────
 
@@ -116,229 +97,11 @@ export function CameraView() {
   useEffect(() => {
     startCamera();
     // Wake word desactivado temporalmente; la transcripcion manual sale de useAudio.
-    // if (voiceActivationEnabled) {
-    //   const t = setTimeout(() => startBackgroundRecognition(...), 1000);
-    //   return () => {
-    //     clearTimeout(t);
-    //     stopCamera();
-    //     cancelAnalysis();
-    //   };
-    // }
     return () => {
-      stopManualRecognition();
+      cleanupInteraction();
       stopCamera();
-      cancelAnalysis();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ─── Analysis ────────────────────────────────────────────────────────────────
-
-  const executeSingleAnalysis = useCallback(
-    async (transcript?: string) => {
-      if (isAnalysisInProgressRef.current) return;
-      isAnalysisInProgressRef.current = true;
-
-      // Stop mic input — no longer needed during analysis
-      stopManualRecognition();
-      stopAudioListening();
-      setIsListening(false);
-      setIsAnalyzing(true);
-
-      // Pause wake-word recognition for the ENTIRE cycle.
-      // Single pause here, single resume in finally — no per-utterance flickering.
-      pauseRecognition();
-
-      abortControllerRef.current = new AbortController();
-      const signal = abortControllerRef.current.signal;
-
-      // Fire-and-forget: speak concurrently with the API request.
-      // The speech queue ensures feedback plays AFTER this utterance finishes.
-      speakText("Analizando");
-
-      try {
-        const frame = captureFrame();
-        if (!frame || signal.aborted) return;
-
-        const prompt = transcript
-          ? `Solicitud del usuario: "${transcript}". Responde primero exactamente esa solicitud usando la imagen. ` +
-            `No describas toda la escena ni enumeres objetos alrededor si no ayudan a responder. ` +
-            `Si lo solicitado no es visible, dilo claramente y agrega solo contexto minimo util. ` +
-            `Incluye riesgos criticos evidentes despues de responder lo pedido. ` +
-            `Las detecciones deben ser solo elementos relacionados con la solicitud o riesgos criticos. ` +
-            `Responde en JSON con 'feedback' y 'detections' (maximo 4 objetos si aplica).`
-          : `Describe lo que ves. Identifica maximo 4 objetos principales con distancias aproximadas. ` +
-            `Responde en JSON con 'feedback' y 'detections'.`;
-
-        const result = await sendImageWithPrompt(frame, prompt);
-
-        if (signal.aborted) return;
-
-        setFeedbackText(result.feedback);
-        setShowFeedback(true);
-
-        const boxes: BoundingBox[] = result.detections
-          .slice(0, 4)
-          .map((det, idx) => ({
-            id: Date.now() + idx,
-            ...det,
-            confidence: det.confidence ?? 90,
-          }));
-        if (boxes.length > 0) setActiveBoxes(boxes);
-
-        // Enqueued — plays automatically after "Analizando" finishes
-        if (!signal.aborted) speakText(result.feedback);
-      } catch (err: any) {
-        if (err.name !== "AbortError") {
-          console.error("[executeSingleAnalysis]", err);
-        }
-      } finally {
-        isAnalysisInProgressRef.current = false;
-        setIsAnalyzing(false);
-        abortControllerRef.current = null;
-        resetRecognition();
-        // Single resume — recognition restarts after TTS fully settles (350ms in hook)
-        resumeRecognition();
-      }
-    },
-    [
-      captureFrame,
-      sendImageWithPrompt,
-      speakText,
-      stopAudioListening,
-      stopManualRecognition,
-      pauseRecognition,
-      resumeRecognition,
-      resetRecognition,
-    ],
-  );
-
-  const cancelAnalysis = useCallback(() => {
-    const hadActivity =
-      isAnalysisInProgressRef.current || !!abortControllerRef.current;
-
-    abortControllerRef.current?.abort();
-    abortControllerRef.current = null;
-    cancelActiveRequest();
-
-    if (captureTimeoutRef.current) {
-      clearTimeout(captureTimeoutRef.current);
-      captureTimeoutRef.current = null;
-    }
-
-    cancelSpeech();
-    stopManualRecognition();
-    stopAudioListening();
-
-    isAnalysisInProgressRef.current = false;
-    setIsAnalyzing(false);
-    setIsListening(false);
-    resetRecognition();
-
-    // Ensure recognition resumes even after an aborted cycle
-    resumeRecognition();
-
-    if (hadActivity) speakText("Cancelando");
-  }, [
-    cancelActiveRequest,
-    cancelSpeech,
-    speakText,
-    stopAudioListening,
-    stopManualRecognition,
-    resetRecognition,
-    resumeRecognition,
-  ]);
-
-  const beginManualListening = useCallback(
-    async (announcement = "Escuchando") => {
-      stopAudioListening();
-
-      const started = startManualRecognition();
-      if (!started) {
-        void speakText(SPEECH_RECOGNITION_UNSUPPORTED_MESSAGE);
-        return false;
-      }
-
-      const audioStarted = await startAudioListening();
-      if (!audioStarted && hasKnownMicrophoneAccess) {
-        console.warn(MICROPHONE_RECOVERY_MESSAGE);
-      }
-
-      setIsListening(true);
-      if (announcement) void speakText(announcement);
-      return true;
-    },
-    [
-      hasKnownMicrophoneAccess,
-      speakText,
-      startAudioListening,
-      startManualRecognition,
-      stopAudioListening,
-    ],
-  );
-
-  const cancelCurrentInteraction = useCallback(async () => {
-    abortControllerRef.current?.abort();
-    abortControllerRef.current = null;
-    cancelActiveRequest();
-    stopAudioListening();
-    stopManualRecognition();
-    cancelSpeech();
-    isAnalysisInProgressRef.current = false;
-    setIsAnalyzing(false);
-    setIsListening(false);
-    resetRecognition();
-
-    await speakText("Cancelando");
-  }, [
-    cancelActiveRequest,
-    cancelSpeech,
-    resetRecognition,
-    speakText,
-    stopAudioListening,
-    stopManualRecognition,
-  ]);
-
-  // ─── Mic button ───────────────────────────────────────────────────────────────
-
-  /**
-   * analyzing  ->  cancel everything
-   * listening  ->  stop manual transcription, run analysis with transcript
-   * idle       ->  start manual transcription
-   */
-  const handleMicPress = useCallback(async () => {
-    if (isListening) {
-      const capturedTranscript = stopManualRecognition();
-      stopAudioListening();
-      setIsListening(false);
-      const transcript = (capturedTranscript || userTranscript).trim();
-      await executeSingleAnalysis(transcript || undefined);
-      return;
-    }
-
-    if (isAnalyzing || geminiLoading || audioSpeaking) {
-      await cancelCurrentInteraction();
-      return;
-    }
-
-    await beginManualListening("Escuchando, tocar para analizar");
-  }, [
-    beginManualListening,
-    isAnalyzing,
-    isListening,
-    geminiLoading,
-    audioSpeaking,
-    cancelCurrentInteraction,
-    stopAudioListening,
-    stopManualRecognition,
-    executeSingleAnalysis,
-    userTranscript,
-  ]);
-
-  // ─── Replay last feedback ─────────────────────────────────────────────────────
-
-  const handleSpeakFeedback = useCallback(() => {
-    if (feedbackText) speakText(feedbackText);
-  }, [feedbackText, speakText]);
 
   return (
     <>
@@ -391,7 +154,7 @@ export function CameraView() {
           />
 
           {/* Audio level indicator when listening */}
-          {isListening && (
+          {isListening && hasRealAudioLevel && (
             <div className="absolute top-3 left-3 bg-black/50 backdrop-blur-sm rounded-full px-3 py-1.5 flex items-center gap-2">
               <Mic size={12} className="text-red-400" />
               <div className="w-16 h-1.5 bg-white/20 rounded-full overflow-hidden">
@@ -400,6 +163,15 @@ export function CameraView() {
                   style={{ width: `${audioLevel * 100}%` }}
                 />
               </div>
+            </div>
+          )}
+
+          {isListening && !hasRealAudioLevel && (
+            <div className="absolute top-3 left-3 bg-black/50 backdrop-blur-sm rounded-full px-3 py-1.5 flex items-center gap-2">
+              <Mic size={12} className="text-red-400" />
+              <span className="text-white" style={{ fontSize: 11 }}>
+                Escuchando
+              </span>
             </div>
           )}
 
@@ -590,29 +362,26 @@ export function CameraView() {
         </div>
 
         {/* Mic button and quick actions */}
-        <div
-          onClick={handleMicPress}
-          className="flex flex-col fixed bottom-0 w-full items-center pb-6 pt-2"
-        >
+        <div className="flex flex-col fixed bottom-0 w-full items-center pb-6 pt-2">
           <p style={{ fontSize: "12px" }} className="text-gray-400 mb-3">
-            {isAnalyzing
-              ? "Analizando... Toca para cancelar"
-              : isListening
-                ? "Escuchando... Toca para analizar"
-                : "Toca para hablar"}
+            {statusMessage}
           </p>
 
           {/* Neumorphic mic button */}
           <motion.button
             whileTap={{ scale: 0.93 }}
+            onClick={handleMicPress}
             aria-label={
-              isAnalyzing
-                ? "Cancelar análisis"
-                : isListening
-                  ? "Detener y analizar"
-                  : "Activar micrófono"
+              isCancelling
+                ? "Cancelando"
+                : isAnalyzing
+                  ? "Cancelar análisis"
+                  : isListening
+                    ? "Detener y analizar"
+                    : "Activar micrófono"
             }
             aria-pressed={isListening || isAnalyzing}
+            disabled={buttonDisabled}
             className="relative flex items-center justify-center rounded-full transition-all duration-200 focus:outline-none focus-visible:ring-4 focus-visible:ring-blue-400"
             style={{
               width: 80,
@@ -687,10 +456,10 @@ export function CameraView() {
         </div>
 
         {/* Error messages */}
-        {(cameraError || audioError || geminiError) && (
+        {displayError && (
           <div className="mx-4 mt-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2">
             <p style={{ fontSize: "11px" }} className="text-red-600">
-              {cameraError || audioError || geminiError}
+              {displayError}
             </p>
           </div>
         )}

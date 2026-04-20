@@ -17,6 +17,31 @@ type VoiceRecognitionOptions = {
 
 type RecognitionMode = "background" | "manual";
 
+export type AudioInputStatus =
+  | "idle"
+  | "starting"
+  | "active"
+  | "blocked"
+  | "unavailable"
+  | "error";
+
+export type AudioRecognitionStatus =
+  | "idle"
+  | "starting"
+  | "manual"
+  | "background"
+  | "paused"
+  | "unsupported"
+  | "error";
+
+export type AudioSpeechStatus =
+  | "idle"
+  | "queued"
+  | "speaking"
+  | "cancelled"
+  | "unsupported"
+  | "error";
+
 type MicrophonePermissionStatus =
   | "unknown"
   | "granted"
@@ -33,14 +58,22 @@ type MicrophonePermissionCache = {
 type SpeechQueueItem = {
   text: string;
   resolve: () => void;
+  timeoutMs: number;
   resolved?: boolean;
+};
+
+type SpeakTextOptions = {
+  timeoutMs?: number;
 };
 
 const MICROPHONE_PERMISSION_CACHE_KEY = "visiont:microphone-permission";
 const MICROPHONE_RECOVERY_MESSAGE =
   "El navegador no permitio abrir el microfono aunque ya estaba autorizado. Revisa ajustes o intenta recargar.";
+const SPEECH_PLAYBACK_ERROR_MESSAGE =
+  "No pude reproducir la respuesta hablada. Puedes leerla en pantalla.";
 const DEFAULT_RECOGNITION_LANGUAGE = "es-ES";
 const DEFAULT_SILENCE_TIMEOUT = 4000;
+const DEFAULT_SPEECH_TIMEOUT_MS = 12000;
 const DEFAULT_WAKE_WORDS = [
   "analiza",
   "quiero que",
@@ -178,6 +211,9 @@ const getSpeechRecognitionConstructor = () => {
   );
 };
 
+const isTransientMicrophoneError = (err: any) =>
+  err?.name === "AbortError" || err?.name === "NotReadableError";
+
 export function useAudio(options: AudioOptions = {}) {
   const {
     sendSampleRate = 16000,
@@ -203,6 +239,11 @@ export function useAudio(options: AudioOptions = {}) {
   const [isBackgroundListening, setIsBackgroundListening] = useState(false);
   const [isVoiceActive, setIsVoiceActive] = useState(false);
   const [isVoiceProcessing, setIsVoiceProcessing] = useState(false);
+  const [inputStatus, setInputStatus] = useState<AudioInputStatus>("idle");
+  const [recognitionStatus, setRecognitionStatus] =
+    useState<AudioRecognitionStatus>("idle");
+  const [speechStatus, setSpeechStatus] = useState<AudioSpeechStatus>("idle");
+  const [lastAudioError, setLastAudioError] = useState<string | null>(null);
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -211,6 +252,8 @@ export function useAudio(options: AudioOptions = {}) {
   const onAudioChunkRef = useRef<((chunkBase64: string) => void) | null>(null);
   const isListeningRef = useRef(false);
   const isStartingRef = useRef(false);
+  const inputStartPromiseRef = useRef<Promise<boolean> | null>(null);
+  const audioGenerationRef = useRef(0);
   const hasKnownMicrophoneAccessRef = useRef(
     Boolean(readMicrophonePermissionCache()),
   );
@@ -239,6 +282,7 @@ export function useAudio(options: AudioOptions = {}) {
   const isBackgroundListeningRef = useRef(false);
   const isRecognitionPausedRef = useRef(false);
   const isRecognitionStartingRef = useRef(false);
+  const recognitionGenerationRef = useRef(0);
 
   useEffect(() => {
     let isMounted = true;
@@ -301,7 +345,13 @@ export function useAudio(options: AudioOptions = {}) {
 
   // --- Microphone ---
 
+  const setAudioError = useCallback((message: string | null) => {
+    setError(message);
+    setLastAudioError(message);
+  }, []);
+
   const cleanupInput = useCallback(() => {
+    audioGenerationRef.current += 1;
     if (audioWorkletNodeRef.current) {
       audioWorkletNodeRef.current.port.postMessage({ type: "stop" });
       audioWorkletNodeRef.current.disconnect();
@@ -314,106 +364,152 @@ export function useAudio(options: AudioOptions = {}) {
     cleanupWorkletUrl();
     isListeningRef.current = false;
     isStartingRef.current = false;
+    inputStartPromiseRef.current = null;
     setIsListening(false);
     setAudioLevel(0);
+    setInputStatus("idle");
   }, [cleanupWorkletUrl]);
 
   const startListening = useCallback(
     async (onAudioChunk?: (chunkBase64: string) => void): Promise<boolean> => {
-      if (isListeningRef.current || isStartingRef.current) {
+      if (isListeningRef.current) {
         return true;
       }
 
-      try {
-        if (
-          typeof navigator === "undefined" ||
-          !navigator.mediaDevices?.getUserMedia
-        ) {
-          setPermissionStatus("unavailable");
-          setPermissionGranted(false);
-          setError("Este navegador no permite abrir el microfono.");
-          return false;
-        }
+      if (inputStartPromiseRef.current) {
+        return inputStartPromiseRef.current;
+      }
 
-        isStartingRef.current = true;
-        setError(null);
-        onAudioChunkRef.current = onAudioChunk ?? null;
+      const startPromise = (async () => {
+        const openGeneration = audioGenerationRef.current + 1;
+        audioGenerationRef.current = openGeneration;
 
-        const browserPermissionStatus = await queryMicrophonePermission();
-        if (browserPermissionStatus !== "unknown") {
-          setPermissionStatus(browserPermissionStatus);
-        }
-
-        const audioContext = new AudioContext({ sampleRate: sendSampleRate });
-        audioContextRef.current = audioContext;
-
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: enableEchoCancellation,
-            noiseSuppression: true,
-            autoGainControl: true,
-            sampleRate: sendSampleRate,
-          },
-        });
-        streamRef.current = stream;
-
-        const source = audioContext.createMediaStreamSource(stream);
-
-        await loadWorkletModule(audioContext);
-
-        const workletNode = new AudioWorkletNode(
-          audioContext,
-          "audio-processor",
-          {
-            processorOptions: { chunkSize },
-            numberOfInputs: 1,
-            numberOfOutputs: 1,
-            outputChannelCount: [1],
+        try {
+          if (
+            typeof navigator === "undefined" ||
+            !navigator.mediaDevices?.getUserMedia
+          ) {
+            const message = "Este navegador no permite abrir el microfono.";
+            setPermissionStatus("unavailable");
+            setPermissionGranted(false);
+            setInputStatus("unavailable");
+            setAudioError(message);
+            return false;
           }
-        );
-        audioWorkletNodeRef.current = workletNode;
 
-        workletNode.port.onmessage = (event: MessageEvent) => {
-          const { type, pcmData, audioLevel: level } = event.data;
-          if (type === "audio-chunk") {
-            setAudioLevel(level);
-            if (onAudioChunkRef.current && pcmData) {
-              const base64 = int16ToBase64(new Int16Array(pcmData));
-              onAudioChunkRef.current(base64);
+          isStartingRef.current = true;
+          setInputStatus("starting");
+          setAudioError(null);
+          onAudioChunkRef.current = onAudioChunk ?? null;
+
+          const browserPermissionStatus = await queryMicrophonePermission();
+          if (browserPermissionStatus !== "unknown") {
+            setPermissionStatus(browserPermissionStatus);
+          }
+
+          const openInputOnce = async () => {
+            const audioContext = new AudioContext({ sampleRate: sendSampleRate });
+            audioContextRef.current = audioContext;
+
+            const stream = await navigator.mediaDevices.getUserMedia({
+              audio: {
+                echoCancellation: enableEchoCancellation,
+                noiseSuppression: true,
+                autoGainControl: true,
+                sampleRate: sendSampleRate,
+              },
+            });
+            streamRef.current = stream;
+
+            const source = audioContext.createMediaStreamSource(stream);
+
+            await loadWorkletModule(audioContext);
+
+            const workletNode = new AudioWorkletNode(
+              audioContext,
+              "audio-processor",
+              {
+                processorOptions: { chunkSize },
+                numberOfInputs: 1,
+                numberOfOutputs: 1,
+                outputChannelCount: [1],
+              },
+            );
+            audioWorkletNodeRef.current = workletNode;
+
+            workletNode.port.onmessage = (event: MessageEvent) => {
+              if (openGeneration !== audioGenerationRef.current) {
+                return;
+              }
+
+              const { type, pcmData, audioLevel: level } = event.data;
+              if (type === "audio-chunk") {
+                setAudioLevel(level);
+                if (onAudioChunkRef.current && pcmData) {
+                  const base64 = int16ToBase64(new Int16Array(pcmData));
+                  onAudioChunkRef.current(base64);
+                }
+              }
+            };
+
+            source.connect(workletNode);
+            workletNode.connect(audioContext.destination);
+          };
+
+          try {
+            await openInputOnce();
+          } catch (err: any) {
+            cleanupInput();
+            if (isTransientMicrophoneError(err)) {
+              audioGenerationRef.current = openGeneration;
+              isStartingRef.current = true;
+              setInputStatus("starting");
+              await openInputOnce();
+            } else {
+              throw err;
             }
           }
-        };
 
-        source.connect(workletNode);
-        workletNode.connect(audioContext.destination);
+          if (openGeneration !== audioGenerationRef.current) {
+            cleanupInput();
+            return false;
+          }
 
-        isListeningRef.current = true;
-        isStartingRef.current = false;
-        hasKnownMicrophoneAccessRef.current = true;
-        writeMicrophonePermissionGranted();
-        setIsListening(true);
-        setPermissionGranted(true);
-        setPermissionStatus("granted");
-        return true;
-      } catch (err: any) {
-        const hadKnownAccess =
-          hasKnownMicrophoneAccessRef.current ||
-          permissionStatus === "granted" ||
-          Boolean(readMicrophonePermissionCache());
-        const msg =
-          err.name === "NotAllowedError"
+          isListeningRef.current = true;
+          isStartingRef.current = false;
+          hasKnownMicrophoneAccessRef.current = true;
+          writeMicrophonePermissionGranted();
+          setIsListening(true);
+          setInputStatus("active");
+          setPermissionGranted(true);
+          setPermissionStatus("granted");
+          return true;
+        } catch (err: any) {
+          const hadKnownAccess =
+            hasKnownMicrophoneAccessRef.current ||
+            permissionStatus === "granted" ||
+            Boolean(readMicrophonePermissionCache());
+          const isBlocked = err.name === "NotAllowedError";
+          const msg = isBlocked
             ? hadKnownAccess
               ? MICROPHONE_RECOVERY_MESSAGE
               : "Permiso de microfono denegado. Habilita el acceso en la configuracion del navegador."
             : `Error al acceder al microfono: ${err.message}`;
-        setError(msg);
-        setPermissionGranted(false);
-        setPermissionStatus(
-          err.name === "NotAllowedError" ? "denied" : "unknown",
-        );
-        cleanupInput();
-        return false;
-      }
+          setAudioError(msg);
+          setPermissionGranted(false);
+          setPermissionStatus(isBlocked ? "denied" : "unknown");
+          setInputStatus(isBlocked ? "blocked" : "error");
+          cleanupInput();
+          setInputStatus(isBlocked ? "blocked" : "error");
+          return false;
+        } finally {
+          isStartingRef.current = false;
+          inputStartPromiseRef.current = null;
+        }
+      })();
+
+      inputStartPromiseRef.current = startPromise;
+      return startPromise;
     },
     [
       sendSampleRate,
@@ -421,6 +517,7 @@ export function useAudio(options: AudioOptions = {}) {
       enableEchoCancellation,
       loadWorkletModule,
       cleanupInput,
+      setAudioError,
       permissionStatus,
     ]
   );
@@ -517,6 +614,7 @@ export function useAudio(options: AudioOptions = {}) {
       }
 
       setIsRecognitionSupported(true);
+      const generation = recognitionGenerationRef.current;
       const { language, silenceTimeout, onActivation } =
         getRecognitionOptions();
       const recognition = new SpeechRecognition();
@@ -526,19 +624,29 @@ export function useAudio(options: AudioOptions = {}) {
       recognition.maxAlternatives = 1;
 
       recognition.onstart = () => {
+        if (generation !== recognitionGenerationRef.current) {
+          return;
+        }
+
         isRecognitionStartingRef.current = false;
         recognitionModeRef.current = mode;
 
         if (mode === "manual") {
           setIsManualListening(true);
+          setRecognitionStatus("manual");
           return;
         }
 
         isBackgroundListeningRef.current = true;
         setIsBackgroundListening(true);
+        setRecognitionStatus("background");
       };
 
       recognition.onresult = (event: any) => {
+        if (generation !== recognitionGenerationRef.current) {
+          return;
+        }
+
         let final = "";
         let interim = "";
 
@@ -581,6 +689,10 @@ export function useAudio(options: AudioOptions = {}) {
       };
 
       recognition.onerror = (event: any) => {
+        if (generation !== recognitionGenerationRef.current) {
+          return;
+        }
+
         if (event.error === "no-speech" || event.error === "aborted") {
           return;
         }
@@ -596,20 +708,27 @@ export function useAudio(options: AudioOptions = {}) {
           setIsBackgroundListening(false);
           setIsManualListening(false);
           setIsVoiceActive(false);
-          setError("Permiso de microfono denegado");
+          setRecognitionStatus("error");
+          setAudioError("Permiso de microfono denegado");
           return;
         }
 
         console.warn("[useAudio] SpeechRecognition error:", event.error);
+        setRecognitionStatus("error");
       };
 
       recognition.onend = () => {
+        if (generation !== recognitionGenerationRef.current) {
+          return;
+        }
+
         recognitionRef.current = null;
         isRecognitionStartingRef.current = false;
 
         if (mode === "manual") {
           recognitionModeRef.current = null;
           setIsManualListening(false);
+          setRecognitionStatus("idle");
           return;
         }
 
@@ -643,6 +762,7 @@ export function useAudio(options: AudioOptions = {}) {
       getRecognitionOptions,
       handleSilenceTimeout,
       resetTranscript,
+      setAudioError,
       updateTranscript,
     ],
   );
@@ -652,21 +772,24 @@ export function useAudio(options: AudioOptions = {}) {
       const SpeechRecognition = getSpeechRecognitionConstructor();
       if (!SpeechRecognition) {
         setIsRecognitionSupported(false);
-        setError("Reconocimiento de voz no soportado en este navegador");
+        setRecognitionStatus("unsupported");
+        setAudioError("Reconocimiento de voz no soportado en este navegador");
         return;
       }
 
       recognitionOptionsRef.current = recognitionOptions;
       setIsRecognitionSupported(true);
-      setError(null);
+      setAudioError(null);
       isBackgroundListeningRef.current = true;
       isRecognitionPausedRef.current = false;
+      setRecognitionStatus("starting");
 
       if (recognitionRef.current || isRecognitionStartingRef.current) {
         return;
       }
 
       recognitionModeRef.current = "background";
+      recognitionGenerationRef.current += 1;
       const recognition = buildRecognition("background");
       if (!recognition) {
         return;
@@ -682,10 +805,11 @@ export function useAudio(options: AudioOptions = {}) {
         recognitionRef.current = null;
         recognitionModeRef.current = null;
         setIsBackgroundListening(false);
-        setError(`Error al iniciar reconocimiento: ${err.message}`);
+        setRecognitionStatus("error");
+        setAudioError(`Error al iniciar reconocimiento: ${err.message}`);
       }
     },
-    [buildRecognition],
+    [buildRecognition, setAudioError],
   );
 
   const startManualRecognition = useCallback(
@@ -693,7 +817,8 @@ export function useAudio(options: AudioOptions = {}) {
       const SpeechRecognition = getSpeechRecognitionConstructor();
       if (!SpeechRecognition) {
         setIsRecognitionSupported(false);
-        setError("Reconocimiento de voz no soportado en este navegador");
+        setRecognitionStatus("unsupported");
+        setAudioError("Reconocimiento de voz no soportado en este navegador");
         return false;
       }
 
@@ -702,12 +827,13 @@ export function useAudio(options: AudioOptions = {}) {
         ...recognitionOptions,
       };
       setIsRecognitionSupported(true);
-      setError(null);
+      setAudioError(null);
       clearSilenceTimer();
       resetRecognition();
       isBackgroundListeningRef.current = false;
       isRecognitionPausedRef.current = false;
       setIsBackgroundListening(false);
+      setRecognitionStatus("starting");
 
       if (recognitionRef.current) {
         try {
@@ -719,6 +845,7 @@ export function useAudio(options: AudioOptions = {}) {
       isRecognitionStartingRef.current = false;
 
       recognitionModeRef.current = "manual";
+      recognitionGenerationRef.current += 1;
       const recognition = buildRecognition("manual");
       if (!recognition) {
         return false;
@@ -734,11 +861,12 @@ export function useAudio(options: AudioOptions = {}) {
         recognitionModeRef.current = null;
         recognitionRef.current = null;
         setIsManualListening(false);
-        setError(`Error al iniciar reconocimiento: ${err.message}`);
+        setRecognitionStatus("error");
+        setAudioError(`Error al iniciar reconocimiento: ${err.message}`);
         return false;
       }
     },
-    [buildRecognition, clearSilenceTimer, resetRecognition],
+    [buildRecognition, clearSilenceTimer, resetRecognition, setAudioError],
   );
 
   const stopManualRecognition = useCallback(() => {
@@ -747,6 +875,7 @@ export function useAudio(options: AudioOptions = {}) {
 
     isRecognitionStartingRef.current = false;
     recognitionModeRef.current = null;
+    recognitionGenerationRef.current += 1;
 
     if (recognitionRef.current) {
       try {
@@ -756,6 +885,7 @@ export function useAudio(options: AudioOptions = {}) {
     }
 
     setIsManualListening(false);
+    setRecognitionStatus("idle");
     return captured;
   }, []);
 
@@ -764,6 +894,7 @@ export function useAudio(options: AudioOptions = {}) {
     isRecognitionPausedRef.current = false;
     isRecognitionStartingRef.current = false;
     recognitionModeRef.current = null;
+    recognitionGenerationRef.current += 1;
     clearSilenceTimer();
 
     if (recognitionRef.current) {
@@ -778,10 +909,12 @@ export function useAudio(options: AudioOptions = {}) {
     setIsManualListening(false);
     setIsVoiceActive(false);
     setIsVoiceProcessing(false);
+    setRecognitionStatus("idle");
   }, [clearSilenceTimer]);
 
   const pauseRecognition = useCallback(() => {
     isRecognitionPausedRef.current = true;
+    setRecognitionStatus("paused");
     if (recognitionRef.current) {
       try {
         recognitionRef.current.stop();
@@ -813,6 +946,7 @@ export function useAudio(options: AudioOptions = {}) {
 
       recognitionRef.current = recognition;
       isRecognitionStartingRef.current = true;
+      setRecognitionStatus("starting");
       try {
         recognition.start();
       } catch {
@@ -890,6 +1024,7 @@ export function useAudio(options: AudioOptions = {}) {
     isSpeechProcessingRef.current = true;
     const generation = speechGenerationRef.current;
     setIsSpeaking(true);
+    setSpeechStatus("speaking");
 
     while (
       speechQueueRef.current.length > 0 &&
@@ -900,24 +1035,30 @@ export function useAudio(options: AudioOptions = {}) {
 
       await new Promise<void>((innerResolve) => {
         const utterance = new SpeechSynthesisUtterance(item.text);
-        utterance.lang = "es-ES";
-        utterance.rate = 1.0;
-        utterance.pitch = 1.0;
+        let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
-        // Resolve the caller's outer promise when this utterance finishes
-        utterance.onend = () => {
+        const finishUtterance = () => {
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+            timeoutId = null;
+          }
           if (currentUtteranceRef.current === utterance) {
             currentUtteranceRef.current = null;
           }
           resolveSpeechItem(item);
           innerResolve();
         };
+
+        utterance.lang = "es-ES";
+        utterance.rate = 1.0;
+        utterance.pitch = 1.0;
+
+        // Resolve the caller's outer promise when this utterance finishes
+        utterance.onend = finishUtterance;
         utterance.onerror = () => {
-          if (currentUtteranceRef.current === utterance) {
-            currentUtteranceRef.current = null;
-          }
-          resolveSpeechItem(item);
-          innerResolve();
+          setSpeechStatus("error");
+          setAudioError(SPEECH_PLAYBACK_ERROR_MESSAGE);
+          finishUtterance();
         };
 
         // Voice selection deferred to speak time so voices are loaded
@@ -928,6 +1069,12 @@ export function useAudio(options: AudioOptions = {}) {
         if (spanish) utterance.voice = spanish;
 
         currentUtteranceRef.current = utterance;
+        timeoutId = setTimeout(() => {
+          setSpeechStatus("error");
+          setAudioError(SPEECH_PLAYBACK_ERROR_MESSAGE);
+          window.speechSynthesis.cancel();
+          finishUtterance();
+        }, item.timeoutMs);
         window.speechSynthesis.speak(utterance);
       });
 
@@ -939,8 +1086,9 @@ export function useAudio(options: AudioOptions = {}) {
     if (generation === speechGenerationRef.current) {
       isSpeechProcessingRef.current = false;
       setIsSpeaking(false);
+      setSpeechStatus("idle");
     }
-  }, []);
+  }, [setAudioError]);
 
   /**
    * Speak text sequentially.
@@ -949,17 +1097,23 @@ export function useAudio(options: AudioOptions = {}) {
    * Returns a promise that resolves when this specific text has been spoken.
    */
   const speakText = useCallback(
-    async (text: string): Promise<void> => {
-      if (!("speechSynthesis" in window)) {
-        setError("Web Speech API no disponible en este navegador");
+    async (text: string, options: SpeakTextOptions = {}): Promise<void> => {
+      if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+        setSpeechStatus("unsupported");
+        setAudioError("Web Speech API no disponible en este navegador");
         return;
       }
       return new Promise<void>((resolve) => {
-        speechQueueRef.current.push({ text, resolve });
+        speechQueueRef.current.push({
+          text,
+          resolve,
+          timeoutMs: options.timeoutMs ?? DEFAULT_SPEECH_TIMEOUT_MS,
+        });
+        setSpeechStatus(isSpeechProcessingRef.current ? "speaking" : "queued");
         processSpeechQueue();
       });
     },
-    [processSpeechQueue]
+    [processSpeechQueue, setAudioError]
   );
 
   /**
@@ -977,30 +1131,58 @@ export function useAudio(options: AudioOptions = {}) {
     currentSpeechItemRef.current = null;
 
     // Stop whatever is currently being spoken
-    window.speechSynthesis.cancel();
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
     currentUtteranceRef.current = null;
     isSpeechProcessingRef.current = false;
     setIsSpeaking(false);
+    setSpeechStatus("cancelled");
   }, []);
+
+  const stopAllAudio = useCallback(
+    (_reason?: string) => {
+      audioGenerationRef.current += 1;
+      recognitionGenerationRef.current += 1;
+      stopBackgroundRecognition();
+      cleanupInput();
+      clearSilenceTimer();
+      cancelSpeech();
+
+      if (
+        playbackContextRef.current &&
+        playbackContextRef.current.state !== "closed"
+      ) {
+        void playbackContextRef.current.close();
+      }
+      playbackContextRef.current = null;
+      playbackQueueRef.current = [];
+      isPlayingRef.current = false;
+      onAudioChunkRef.current = null;
+      recognitionRef.current = null;
+      recognitionModeRef.current = null;
+      isRecognitionStartingRef.current = false;
+      isRecognitionPausedRef.current = false;
+      isBackgroundListeningRef.current = false;
+      isVoiceActiveRef.current = false;
+      setIsBackgroundListening(false);
+      setIsManualListening(false);
+      setIsVoiceActive(false);
+      setIsVoiceProcessing(false);
+      setRecognitionStatus("idle");
+      setInputStatus("idle");
+      setAudioLevel(0);
+    },
+    [cancelSpeech, cleanupInput, clearSilenceTimer, stopBackgroundRecognition],
+  );
 
   // --- Cleanup ---
 
   useEffect(() => {
     return () => {
-      stopBackgroundRecognition();
-      stopListening();
-      cancelSpeech();
-      if (
-        playbackContextRef.current &&
-        playbackContextRef.current.state !== "closed"
-      ) {
-        playbackContextRef.current.close();
-        playbackContextRef.current = null;
-      }
-      playbackQueueRef.current = [];
-      isPlayingRef.current = false;
+      stopAllAudio("unmount");
     };
-  }, [stopBackgroundRecognition, stopListening, cancelSpeech]);
+  }, [stopAllAudio]);
 
   return {
     isListening,
@@ -1011,6 +1193,10 @@ export function useAudio(options: AudioOptions = {}) {
     hasKnownMicrophoneAccess:
       hasKnownMicrophoneAccessRef.current || permissionStatus === "granted",
     audioLevel,
+    inputStatus,
+    recognitionStatus,
+    speechStatus,
+    lastAudioError,
     transcript,
     isRecognitionSupported,
     isManualListening,
@@ -1026,6 +1212,7 @@ export function useAudio(options: AudioOptions = {}) {
     pauseRecognition,
     resumeRecognition,
     resetRecognition,
+    stopAllAudio,
     playAudioChunk,
     speakText,
     cancelSpeech,
