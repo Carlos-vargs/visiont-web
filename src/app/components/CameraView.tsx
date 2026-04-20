@@ -6,7 +6,6 @@ import { Flashlight, ZoomIn, Info, Mic, MicOff } from "lucide-react";
 import { useCamera } from "../hooks/useCamera";
 import { useAudio } from "../hooks/useAudio";
 import { useGemini } from "../hooks/useGemini";
-import { useVoiceActivation } from "../hooks/useVoiceActivation";
 
 type BoundingBox = {
   id: number;
@@ -50,12 +49,6 @@ export function CameraView() {
   const captureTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isAnalysisInProgressRef = useRef(false);
 
-  // Stable refs for callbacks used inside useVoiceActivation closures
-  const executeSingleAnalysisRef = useRef<
-    ((transcript?: string) => Promise<void>) | null
-  >(null);
-  const startVoiceListeningRef = useRef<(() => Promise<void>) | null>(null);
-
   // ─── Hooks ────────────────────────────────────────────────────────────────────
 
   const {
@@ -81,8 +74,14 @@ export function CameraView() {
     error: audioError,
     audioLevel,
     hasKnownMicrophoneAccess,
+    transcript: userTranscript,
     startListening: startAudioListening,
     stopListening: stopAudioListening,
+    startManualRecognition,
+    stopManualRecognition,
+    pauseRecognition,
+    resumeRecognition,
+    resetRecognition,
     speakText,
     cancelSpeech,
   } = useAudio({ sendSampleRate: 16000, enableEchoCancellation: true });
@@ -94,30 +93,6 @@ export function CameraView() {
     sendImageWithPrompt,
     cancelActiveRequest,
   } = useGemini();
-
-  const {
-    isBackgroundListening,
-    isActive: voiceActive,
-    isProcessing: voiceProcessing,
-    transcript: userTranscript,
-    error: voiceError,
-    startBackgroundListening,
-    startManualListening,
-    stopManualListening,
-    pauseRecognition,
-    resumeRecognition,
-    resetActive,
-  } = useVoiceActivation({
-    silenceTimeout: 4000,
-    onActivation: () => {
-      if (!isAnalysisInProgressRef.current) {
-        startVoiceListeningRef.current?.();
-      }
-    },
-    onSilence: (transcript: string) => {
-      executeSingleAnalysisRef.current?.(transcript);
-    },
-  });
 
   // ─── Debug transcript log ─────────────────────────────────────────────────────
 
@@ -140,9 +115,9 @@ export function CameraView() {
 
   useEffect(() => {
     startCamera();
-    // Wake word desactivado temporalmente; la transcripcion manual sale de useVoiceActivation.
+    // Wake word desactivado temporalmente; la transcripcion manual sale de useAudio.
     // if (voiceActivationEnabled) {
-    //   const t = setTimeout(() => startBackgroundListening(), 1000);
+    //   const t = setTimeout(() => startBackgroundRecognition(...), 1000);
     //   return () => {
     //     clearTimeout(t);
     //     stopCamera();
@@ -150,7 +125,7 @@ export function CameraView() {
     //   };
     // }
     return () => {
-      stopManualListening();
+      stopManualRecognition();
       stopCamera();
       cancelAnalysis();
     };
@@ -164,7 +139,7 @@ export function CameraView() {
       isAnalysisInProgressRef.current = true;
 
       // Stop mic input — no longer needed during analysis
-      stopManualListening();
+      stopManualRecognition();
       stopAudioListening();
       setIsListening(false);
       setIsAnalyzing(true);
@@ -220,7 +195,7 @@ export function CameraView() {
         isAnalysisInProgressRef.current = false;
         setIsAnalyzing(false);
         abortControllerRef.current = null;
-        resetActive();
+        resetRecognition();
         // Single resume — recognition restarts after TTS fully settles (350ms in hook)
         resumeRecognition();
       }
@@ -230,10 +205,10 @@ export function CameraView() {
       sendImageWithPrompt,
       speakText,
       stopAudioListening,
-      stopManualListening,
+      stopManualRecognition,
       pauseRecognition,
       resumeRecognition,
-      resetActive,
+      resetRecognition,
     ],
   );
 
@@ -251,12 +226,13 @@ export function CameraView() {
     }
 
     cancelSpeech();
-    stopManualListening();
+    stopManualRecognition();
+    stopAudioListening();
 
     isAnalysisInProgressRef.current = false;
     setIsAnalyzing(false);
     setIsListening(false);
-    resetActive();
+    resetRecognition();
 
     // Ensure recognition resumes even after an aborted cycle
     resumeRecognition();
@@ -266,50 +242,27 @@ export function CameraView() {
     cancelActiveRequest,
     cancelSpeech,
     speakText,
-    stopManualListening,
-    resetActive,
+    stopAudioListening,
+    stopManualRecognition,
+    resetRecognition,
     resumeRecognition,
   ]);
-
-  // ─── Assign stable refs ───────────────────────────────────────────────────────
-
-  useEffect(() => {
-    executeSingleAnalysisRef.current = executeSingleAnalysis;
-  }, [executeSingleAnalysis]);
-
-  // ─── Voice listening (wake word activation) ───────────────────────────────────
-
-  const startVoiceListening = useCallback(async () => {
-    const started = await startAudioListening();
-    if (!started) {
-      if (hasKnownMicrophoneAccess) void speakText(MICROPHONE_RECOVERY_MESSAGE);
-      return;
-    }
-    setIsListening(true);
-    // No pause here — recognition stays running so the user's question is captured.
-    // "Escuchando" is not a wake word so it won't re-trigger activation.
-    speakText("Escuchando");
-  }, [hasKnownMicrophoneAccess, startAudioListening, speakText]);
-
-  useEffect(() => {
-    startVoiceListeningRef.current = startVoiceListening;
-  }, [startVoiceListening]);
 
   const beginManualListening = useCallback(
     async (announcement = "Escuchando") => {
       stopAudioListening();
-      const audioStarted = await startAudioListening();
-      if (!audioStarted) {
-        if (hasKnownMicrophoneAccess) void speakText(MICROPHONE_RECOVERY_MESSAGE);
-        return false;
-      }
 
-      const started = startManualListening();
+      const started = startManualRecognition();
       if (!started) {
-        stopAudioListening();
         void speakText(SPEECH_RECOGNITION_UNSUPPORTED_MESSAGE);
         return false;
       }
+
+      const audioStarted = await startAudioListening();
+      if (!audioStarted && hasKnownMicrophoneAccess) {
+        console.warn(MICROPHONE_RECOVERY_MESSAGE);
+      }
+
       setIsListening(true);
       if (announcement) void speakText(announcement);
       return true;
@@ -318,7 +271,7 @@ export function CameraView() {
       hasKnownMicrophoneAccess,
       speakText,
       startAudioListening,
-      startManualListening,
+      startManualRecognition,
       stopAudioListening,
     ],
   );
@@ -328,21 +281,21 @@ export function CameraView() {
     abortControllerRef.current = null;
     cancelActiveRequest();
     stopAudioListening();
-    stopManualListening();
+    stopManualRecognition();
     cancelSpeech();
     isAnalysisInProgressRef.current = false;
     setIsAnalyzing(false);
     setIsListening(false);
-    resetActive();
+    resetRecognition();
 
     await speakText("Cancelando");
   }, [
     cancelActiveRequest,
     cancelSpeech,
-    resetActive,
+    resetRecognition,
     speakText,
     stopAudioListening,
-    stopManualListening,
+    stopManualRecognition,
   ]);
 
   // ─── Mic button ───────────────────────────────────────────────────────────────
@@ -354,7 +307,7 @@ export function CameraView() {
    */
   const handleMicPress = useCallback(async () => {
     if (isListening) {
-      const capturedTranscript = stopManualListening();
+      const capturedTranscript = stopManualRecognition();
       stopAudioListening();
       setIsListening(false);
       const transcript = (capturedTranscript || userTranscript).trim();
@@ -376,7 +329,7 @@ export function CameraView() {
     audioSpeaking,
     cancelCurrentInteraction,
     stopAudioListening,
-    stopManualListening,
+    stopManualRecognition,
     executeSingleAnalysis,
     userTranscript,
   ]);
@@ -734,10 +687,10 @@ export function CameraView() {
         </div>
 
         {/* Error messages */}
-        {(cameraError || audioError || geminiError || voiceError) && (
+        {(cameraError || audioError || geminiError) && (
           <div className="mx-4 mt-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2">
             <p style={{ fontSize: "11px" }} className="text-red-600">
-              {cameraError || audioError || geminiError || voiceError}
+              {cameraError || audioError || geminiError}
             </p>
           </div>
         )}

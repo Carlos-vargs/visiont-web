@@ -16,7 +16,6 @@ import {
   BookUser,
 } from "lucide-react";
 import { useAudio } from "../hooks/useAudio";
-import { useVoiceActivation } from "../hooks/useVoiceActivation";
 import { useContactPicker, type Contact } from "../hooks/useContactPicker";
 
 const initialContacts: Contact[] = [
@@ -32,6 +31,20 @@ const initialContacts: Contact[] = [
 
 const MICROPHONE_RECOVERY_MESSAGE =
   "El navegador no permitio abrir el microfono aunque ya estaba autorizado. Revisa ajustes o intenta recargar.";
+const SOS_WAKE_WORDS = [
+  "ayuda",
+  "emergencia",
+  "sos",
+  "llama a",
+  "llamar a",
+  "marca a",
+  "buscar contacto",
+  "busca a",
+  "agregar contacto",
+  "agrega a",
+  "sincroniza contactos",
+  "contacto",
+];
 
 const getInitials = (name: string): string =>
   name
@@ -182,13 +195,17 @@ export function SOSView() {
   });
 
   const {
-    isListening: audioListening,
     isSpeaking: audioSpeaking,
     error: audioError,
     audioLevel,
     hasKnownMicrophoneAccess,
+    isBackgroundListening,
+    transcript: userTranscript,
     startListening: startAudioListening,
     stopListening: stopAudioListening,
+    startBackgroundRecognition,
+    stopBackgroundRecognition,
+    resetRecognition,
     speakText,
     cancelSpeech,
   } = useAudio({
@@ -436,48 +453,6 @@ export function SOSView() {
     ],
   );
 
-  const {
-    isBackgroundListening,
-    isActive: voiceActive,
-    isProcessing: voiceProcessing,
-    transcript: userTranscript,
-    error: voiceError,
-    startBackgroundListening,
-    resetActive,
-  } = useVoiceActivation({
-    wakeWords: [
-      "ayuda",
-      "emergencia",
-      "sos",
-      "llama a",
-      "llamar a",
-      "marca a",
-      "buscar contacto",
-      "busca a",
-      "agregar contacto",
-      "agrega a",
-      "sincroniza contactos",
-      "contacto",
-    ],
-    silenceTimeout: 4000,
-    onActivation: () => {
-      console.log("Wake word detected, activating microphone...");
-      if (!isListeningRef.current && !isProcessingVoiceRef.current) {
-        if (startVoiceListeningRef.current) {
-          startVoiceListeningRef.current();
-        }
-      }
-    },
-    onSilence: (transcript: string) => {
-      console.log("Silence detected, processing transcript:", transcript);
-      if (isListeningRef.current) {
-        if (executeVoiceCommandRef.current) {
-          executeVoiceCommandRef.current(transcript);
-        }
-      }
-    },
-  });
-
   // executeVoiceCommand - analogo a executeSingleAnalysis en CameraView
   const executeVoiceCommand = useCallback(
     async (transcript?: string) => {
@@ -506,12 +481,12 @@ export function SOSView() {
           }
         }
         if (voiceCommandCycleRef.current === commandCycleId) {
-          resetActive();
+          resetRecognition();
         }
       } catch (err: any) {
         console.error("Error processing voice command:", err);
         if (voiceCommandCycleRef.current === commandCycleId) {
-          resetActive();
+          resetRecognition();
         }
       } finally {
         if (voiceCommandCycleRef.current === commandCycleId) {
@@ -520,7 +495,7 @@ export function SOSView() {
         }
       }
     },
-    [handleVoiceCommand, resetActive, speakStatus, stopAudioListening],
+    [handleVoiceCommand, resetRecognition, speakStatus, stopAudioListening],
   );
 
   // Ref assignments para callbacks seguros
@@ -549,7 +524,7 @@ export function SOSView() {
     isProcessingVoiceRef.current = false;
     setIsProcessingVoice(false);
     setIsListening(false);
-    resetActive();
+    resetRecognition();
 
     await speakStatus("Cancelando");
 
@@ -561,7 +536,7 @@ export function SOSView() {
     setIsListening(true);
   }, [
     hasKnownMicrophoneAccess,
-    resetActive,
+    resetRecognition,
     speakStatus,
     startAudioListening,
     stopAudioListening,
@@ -570,11 +545,30 @@ export function SOSView() {
   // Iniciar escucha en background al montar
   useEffect(() => {
     // Pequeño delay para asegurar inicialización correcta
-    setTimeout(() => startBackgroundListening(), 500);
+    const timer = setTimeout(() => {
+      startBackgroundRecognition({
+        wakeWords: SOS_WAKE_WORDS,
+        silenceTimeout: 4000,
+        onActivation: () => {
+          console.log("Wake word detected, activating microphone...");
+          if (!isListeningRef.current && !isProcessingVoiceRef.current) {
+            startVoiceListeningRef.current?.();
+          }
+        },
+        onSilence: (transcript: string) => {
+          console.log("Silence detected, processing transcript:", transcript);
+          if (isListeningRef.current) {
+            executeVoiceCommandRef.current?.(transcript);
+          }
+        },
+      });
+    }, 500);
     return () => {
+      clearTimeout(timer);
+      stopBackgroundRecognition();
       cancelSpeech();
     };
-  }, [cancelSpeech, startBackgroundListening]);
+  }, [cancelSpeech, startBackgroundRecognition, stopBackgroundRecognition]);
 
   // Sincronizar contactos cuando hay permiso
   useEffect(() => {
@@ -634,7 +628,6 @@ export function SOSView() {
     hasKnownMicrophoneAccess,
     isListening,
     isProcessingVoice,
-    resetActive,
     speakStatus,
     startAudioListening,
     stopAudioListening,
@@ -1146,10 +1139,10 @@ export function SOSView() {
           </motion.button>
         </div>
 
-        {(audioError || voiceError) && (
+        {audioError && (
           <div className="mx-4 mt-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2">
             <p style={{ fontSize: "11px" }} className="text-red-600">
-              {audioError || voiceError}
+              {audioError}
             </p>
           </div>
         )}

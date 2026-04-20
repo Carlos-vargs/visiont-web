@@ -7,6 +7,16 @@ type AudioOptions = {
   enableEchoCancellation?: boolean;
 };
 
+type VoiceRecognitionOptions = {
+  wakeWords?: string[];
+  silenceTimeout?: number;
+  language?: string;
+  onActivation?: () => void;
+  onSilence?: (transcript: string) => void;
+};
+
+type RecognitionMode = "background" | "manual";
+
 type MicrophonePermissionStatus =
   | "unknown"
   | "granted"
@@ -29,6 +39,15 @@ type SpeechQueueItem = {
 const MICROPHONE_PERMISSION_CACHE_KEY = "visiont:microphone-permission";
 const MICROPHONE_RECOVERY_MESSAGE =
   "El navegador no permitio abrir el microfono aunque ya estaba autorizado. Revisa ajustes o intenta recargar.";
+const DEFAULT_RECOGNITION_LANGUAGE = "es-ES";
+const DEFAULT_SILENCE_TIMEOUT = 4000;
+const DEFAULT_WAKE_WORDS = [
+  "analiza",
+  "quiero que",
+  "ok visiont",
+  "visont",
+  "analizando",
+];
 
 // Int16Array -> Base64
 const int16ToBase64 = (int16Array: Int16Array): string => {
@@ -147,6 +166,18 @@ const queryMicrophonePermission =
     }
   };
 
+const getSpeechRecognitionConstructor = () => {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  return (
+    (window as any).SpeechRecognition ||
+    (window as any).webkitSpeechRecognition ||
+    null
+  );
+};
+
 export function useAudio(options: AudioOptions = {}) {
   const {
     sendSampleRate = 16000,
@@ -166,6 +197,12 @@ export function useAudio(options: AudioOptions = {}) {
     () => permissionStatus === "granted",
   );
   const [audioLevel, setAudioLevel] = useState(0);
+  const [transcript, setTranscript] = useState("");
+  const [isRecognitionSupported, setIsRecognitionSupported] = useState(false);
+  const [isManualListening, setIsManualListening] = useState(false);
+  const [isBackgroundListening, setIsBackgroundListening] = useState(false);
+  const [isVoiceActive, setIsVoiceActive] = useState(false);
+  const [isVoiceProcessing, setIsVoiceProcessing] = useState(false);
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -191,8 +228,22 @@ export function useAudio(options: AudioOptions = {}) {
   const currentSpeechItemRef = useRef<SpeechQueueItem | null>(null);
   const speechGenerationRef = useRef(0);
 
+  // SpeechRecognition state
+  const recognitionRef = useRef<any>(null);
+  const recognitionOptionsRef = useRef<VoiceRecognitionOptions>({});
+  const recognitionModeRef = useRef<RecognitionMode | null>(null);
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const transcriptBufferRef = useRef("");
+  const latestTranscriptRef = useRef("");
+  const isVoiceActiveRef = useRef(false);
+  const isBackgroundListeningRef = useRef(false);
+  const isRecognitionPausedRef = useRef(false);
+  const isRecognitionStartingRef = useRef(false);
+
   useEffect(() => {
     let isMounted = true;
+
+    setIsRecognitionSupported(Boolean(getSpeechRecognitionConstructor()));
 
     const syncPermissionStatus = async () => {
       const browserPermissionStatus = await queryMicrophonePermission();
@@ -378,6 +429,399 @@ export function useAudio(options: AudioOptions = {}) {
     cleanupInput();
   }, [cleanupInput]);
 
+  // --- Speech recognition ---
+
+  const clearSilenceTimer = useCallback(() => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+  }, []);
+
+  const resetTranscript = useCallback(() => {
+    transcriptBufferRef.current = "";
+    latestTranscriptRef.current = "";
+    setTranscript("");
+  }, []);
+
+  const resetRecognition = useCallback(() => {
+    resetTranscript();
+    isVoiceActiveRef.current = false;
+    setIsVoiceActive(false);
+    setIsVoiceProcessing(false);
+    clearSilenceTimer();
+  }, [clearSilenceTimer, resetTranscript]);
+
+  const appendFinalTranscript = useCallback((value: string) => {
+    const clean = value.trim();
+    if (!clean) {
+      return;
+    }
+
+    transcriptBufferRef.current =
+      `${transcriptBufferRef.current} ${clean}`.trim();
+  }, []);
+
+  const updateTranscript = useCallback((interim = "") => {
+    const next = `${transcriptBufferRef.current} ${interim}`.trim();
+    latestTranscriptRef.current = next;
+    setTranscript(next);
+  }, []);
+
+  const getRecognitionOptions = useCallback(() => {
+    const current = recognitionOptionsRef.current;
+    return {
+      wakeWords: current.wakeWords ?? DEFAULT_WAKE_WORDS,
+      silenceTimeout: current.silenceTimeout ?? DEFAULT_SILENCE_TIMEOUT,
+      language: current.language ?? DEFAULT_RECOGNITION_LANGUAGE,
+      onActivation: current.onActivation,
+      onSilence: current.onSilence,
+    };
+  }, []);
+
+  const containsWakeWord = useCallback(
+    (text: string) => {
+      const { wakeWords } = getRecognitionOptions();
+      const lower = text.toLowerCase().trim();
+      return wakeWords.some((word) => lower.includes(word.toLowerCase()));
+    },
+    [getRecognitionOptions],
+  );
+
+  const handleSilenceTimeout = useCallback(() => {
+    if (!isVoiceActiveRef.current) {
+      return;
+    }
+
+    const captured = transcriptBufferRef.current.trim();
+    if (!captured) {
+      isVoiceActiveRef.current = false;
+      setIsVoiceActive(false);
+      return;
+    }
+
+    const { onSilence } = getRecognitionOptions();
+    isVoiceActiveRef.current = false;
+    setIsVoiceActive(false);
+    setIsVoiceProcessing(true);
+    onSilence?.(captured);
+    setIsVoiceProcessing(false);
+  }, [getRecognitionOptions]);
+
+  const buildRecognition = useCallback(
+    (mode: RecognitionMode) => {
+      const SpeechRecognition = getSpeechRecognitionConstructor();
+      if (!SpeechRecognition) {
+        setIsRecognitionSupported(false);
+        return null;
+      }
+
+      setIsRecognitionSupported(true);
+      const { language, silenceTimeout, onActivation } =
+        getRecognitionOptions();
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = language;
+      recognition.maxAlternatives = 1;
+
+      recognition.onstart = () => {
+        isRecognitionStartingRef.current = false;
+        recognitionModeRef.current = mode;
+
+        if (mode === "manual") {
+          setIsManualListening(true);
+          return;
+        }
+
+        isBackgroundListeningRef.current = true;
+        setIsBackgroundListening(true);
+      };
+
+      recognition.onresult = (event: any) => {
+        let final = "";
+        let interim = "";
+
+        for (let i = event.resultIndex; i < event.results.length; i += 1) {
+          const resultText = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            final += resultText;
+          } else {
+            interim += resultText;
+          }
+        }
+
+        const full = final || interim;
+        if (!full) {
+          return;
+        }
+
+        if (mode === "manual") {
+          appendFinalTranscript(final);
+          updateTranscript(interim);
+          return;
+        }
+
+        if (!isVoiceActiveRef.current && containsWakeWord(full)) {
+          isVoiceActiveRef.current = true;
+          setIsVoiceActive(true);
+          resetTranscript();
+          onActivation?.();
+        }
+
+        if (isVoiceActiveRef.current) {
+          appendFinalTranscript(full);
+          updateTranscript();
+          clearSilenceTimer();
+          silenceTimerRef.current = setTimeout(
+            handleSilenceTimeout,
+            silenceTimeout,
+          );
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        if (event.error === "no-speech" || event.error === "aborted") {
+          return;
+        }
+
+        if (event.error === "not-allowed") {
+          isBackgroundListeningRef.current = false;
+          isRecognitionPausedRef.current = false;
+          isRecognitionStartingRef.current = false;
+          recognitionModeRef.current = null;
+          recognitionRef.current = null;
+          isVoiceActiveRef.current = false;
+          clearSilenceTimer();
+          setIsBackgroundListening(false);
+          setIsManualListening(false);
+          setIsVoiceActive(false);
+          setError("Permiso de microfono denegado");
+          return;
+        }
+
+        console.warn("[useAudio] SpeechRecognition error:", event.error);
+      };
+
+      recognition.onend = () => {
+        recognitionRef.current = null;
+        isRecognitionStartingRef.current = false;
+
+        if (mode === "manual") {
+          recognitionModeRef.current = null;
+          setIsManualListening(false);
+          return;
+        }
+
+        if (isBackgroundListeningRef.current && !isRecognitionPausedRef.current) {
+          if (recognitionRef.current || isRecognitionStartingRef.current) {
+            return;
+          }
+
+          const nextRecognition = buildRecognition("background");
+          if (!nextRecognition) {
+            return;
+          }
+
+          recognitionRef.current = nextRecognition;
+          isRecognitionStartingRef.current = true;
+          try {
+            nextRecognition.start();
+          } catch {
+            isRecognitionStartingRef.current = false;
+            recognitionRef.current = null;
+          }
+        }
+      };
+
+      return recognition;
+    },
+    [
+      appendFinalTranscript,
+      clearSilenceTimer,
+      containsWakeWord,
+      getRecognitionOptions,
+      handleSilenceTimeout,
+      resetTranscript,
+      updateTranscript,
+    ],
+  );
+
+  const startBackgroundRecognition = useCallback(
+    (recognitionOptions: VoiceRecognitionOptions = {}) => {
+      const SpeechRecognition = getSpeechRecognitionConstructor();
+      if (!SpeechRecognition) {
+        setIsRecognitionSupported(false);
+        setError("Reconocimiento de voz no soportado en este navegador");
+        return;
+      }
+
+      recognitionOptionsRef.current = recognitionOptions;
+      setIsRecognitionSupported(true);
+      setError(null);
+      isBackgroundListeningRef.current = true;
+      isRecognitionPausedRef.current = false;
+
+      if (recognitionRef.current || isRecognitionStartingRef.current) {
+        return;
+      }
+
+      recognitionModeRef.current = "background";
+      const recognition = buildRecognition("background");
+      if (!recognition) {
+        return;
+      }
+
+      recognitionRef.current = recognition;
+      isRecognitionStartingRef.current = true;
+      try {
+        recognition.start();
+      } catch (err: any) {
+        isBackgroundListeningRef.current = false;
+        isRecognitionStartingRef.current = false;
+        recognitionRef.current = null;
+        recognitionModeRef.current = null;
+        setIsBackgroundListening(false);
+        setError(`Error al iniciar reconocimiento: ${err.message}`);
+      }
+    },
+    [buildRecognition],
+  );
+
+  const startManualRecognition = useCallback(
+    (recognitionOptions: Pick<VoiceRecognitionOptions, "language"> = {}) => {
+      const SpeechRecognition = getSpeechRecognitionConstructor();
+      if (!SpeechRecognition) {
+        setIsRecognitionSupported(false);
+        setError("Reconocimiento de voz no soportado en este navegador");
+        return false;
+      }
+
+      recognitionOptionsRef.current = {
+        ...recognitionOptionsRef.current,
+        ...recognitionOptions,
+      };
+      setIsRecognitionSupported(true);
+      setError(null);
+      clearSilenceTimer();
+      resetRecognition();
+      isBackgroundListeningRef.current = false;
+      isRecognitionPausedRef.current = false;
+      setIsBackgroundListening(false);
+
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch {}
+        recognitionRef.current = null;
+      }
+
+      isRecognitionStartingRef.current = false;
+
+      recognitionModeRef.current = "manual";
+      const recognition = buildRecognition("manual");
+      if (!recognition) {
+        return false;
+      }
+
+      recognitionRef.current = recognition;
+      isRecognitionStartingRef.current = true;
+      try {
+        recognition.start();
+        return true;
+      } catch (err: any) {
+        isRecognitionStartingRef.current = false;
+        recognitionModeRef.current = null;
+        recognitionRef.current = null;
+        setIsManualListening(false);
+        setError(`Error al iniciar reconocimiento: ${err.message}`);
+        return false;
+      }
+    },
+    [buildRecognition, clearSilenceTimer, resetRecognition],
+  );
+
+  const stopManualRecognition = useCallback(() => {
+    const captured =
+      latestTranscriptRef.current.trim() || transcriptBufferRef.current.trim();
+
+    isRecognitionStartingRef.current = false;
+    recognitionModeRef.current = null;
+
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {}
+      recognitionRef.current = null;
+    }
+
+    setIsManualListening(false);
+    return captured;
+  }, []);
+
+  const stopBackgroundRecognition = useCallback(() => {
+    isBackgroundListeningRef.current = false;
+    isRecognitionPausedRef.current = false;
+    isRecognitionStartingRef.current = false;
+    recognitionModeRef.current = null;
+    clearSilenceTimer();
+
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {}
+      recognitionRef.current = null;
+    }
+
+    isVoiceActiveRef.current = false;
+    setIsBackgroundListening(false);
+    setIsManualListening(false);
+    setIsVoiceActive(false);
+    setIsVoiceProcessing(false);
+  }, [clearSilenceTimer]);
+
+  const pauseRecognition = useCallback(() => {
+    isRecognitionPausedRef.current = true;
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {}
+    }
+  }, []);
+
+  const resumeRecognition = useCallback(() => {
+    if (!isBackgroundListeningRef.current) {
+      return;
+    }
+
+    isRecognitionPausedRef.current = false;
+
+    setTimeout(() => {
+      if (
+        isRecognitionPausedRef.current ||
+        !isBackgroundListeningRef.current ||
+        recognitionRef.current ||
+        isRecognitionStartingRef.current
+      ) {
+        return;
+      }
+
+      const recognition = buildRecognition("background");
+      if (!recognition) {
+        return;
+      }
+
+      recognitionRef.current = recognition;
+      isRecognitionStartingRef.current = true;
+      try {
+        recognition.start();
+      } catch {
+        isRecognitionStartingRef.current = false;
+        recognitionRef.current = null;
+      }
+    }, 350);
+  }, [buildRecognition]);
+
   // --- PCM playback ---
 
   const processPlaybackQueue = useCallback(async (ctx: AudioContext) => {
@@ -543,6 +987,7 @@ export function useAudio(options: AudioOptions = {}) {
 
   useEffect(() => {
     return () => {
+      stopBackgroundRecognition();
       stopListening();
       cancelSpeech();
       if (
@@ -555,7 +1000,7 @@ export function useAudio(options: AudioOptions = {}) {
       playbackQueueRef.current = [];
       isPlayingRef.current = false;
     };
-  }, [stopListening, cancelSpeech]);
+  }, [stopBackgroundRecognition, stopListening, cancelSpeech]);
 
   return {
     isListening,
@@ -566,8 +1011,21 @@ export function useAudio(options: AudioOptions = {}) {
     hasKnownMicrophoneAccess:
       hasKnownMicrophoneAccessRef.current || permissionStatus === "granted",
     audioLevel,
+    transcript,
+    isRecognitionSupported,
+    isManualListening,
+    isBackgroundListening,
+    isVoiceActive,
+    isVoiceProcessing,
     startListening,
     stopListening,
+    startManualRecognition,
+    stopManualRecognition,
+    startBackgroundRecognition,
+    stopBackgroundRecognition,
+    pauseRecognition,
+    resumeRecognition,
+    resetRecognition,
     playAudioChunk,
     speakText,
     cancelSpeech,
