@@ -109,7 +109,7 @@ export function CameraView() {
 
   useEffect(() => {
     startCamera();
-    // Wake word desactivado temporalmente; la transcripcion manual sale de useAudio.
+
     return () => {
       cleanupInteraction();
       stopCamera();
@@ -168,8 +168,6 @@ export function CameraView() {
             audioLevel={audioLevel}
           />
 
-          {/* Wake word indicator desactivado temporalmente. */}
-
           <TranscriptOverlay
             transcript={userTranscript}
             visible={isDevelopment}
@@ -184,7 +182,7 @@ export function CameraView() {
           />
         </div>
 
-        {/* Mic button and quick actions */}
+        {/* Mic button and status message */}
         <div className="flex w-full shrink-0 flex-col items-center px-4 pb-6 pt-2">
           <p style={{ fontSize: "12px" }} className="text-gray-400 mb-3">
             {statusMessage}
