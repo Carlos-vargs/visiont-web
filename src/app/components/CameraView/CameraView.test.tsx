@@ -165,4 +165,15 @@ describe("CameraView", () => {
 
     expect(screen.getByTestId("transcript-overlay")).toBeInTheDocument();
   });
+
+  it("uses flex layout instead of viewport height math for the camera frame", () => {
+    render(<CameraView />);
+
+    const shell = screen.getByTestId("camera-view-shell");
+    const frame = screen.getByTestId("camera-frame");
+
+    expect(shell.className).toContain("h-full");
+    expect(frame.getAttribute("style")).toBeNull();
+    expect(frame.className).toContain("flex-1");
+  });
 });

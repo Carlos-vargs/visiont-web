@@ -117,16 +117,17 @@ export function CameraView() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <>
+    <div
+      data-testid="camera-view-shell"
+      className="flex h-full min-h-0 flex-col"
+      style={{ background: "#F8FAFC" }}
+    >
       <AppHeader />
-      <div
-        className="flex flex-col flex-1 overflow-hidden"
-        style={{ background: "#F8FAFC" }}
-      >
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         {/* Camera frame */}
         <div
-          className="mx-4 mt-12 relative overflow-hidden rounded-3xl bg-slate-800 shadow-md"
-          style={{ minHeight: "calc(100dvh - 220px)" }}
+          data-testid="camera-frame"
+          className="mx-4 mt-12 relative min-h-0 flex-1 overflow-hidden rounded-3xl bg-slate-800 shadow-md"
         >
           {/* Camera feed - always rendered for videoRef to exist */}
           <video
@@ -184,7 +185,7 @@ export function CameraView() {
         </div>
 
         {/* Mic button and quick actions */}
-        <div className="flex flex-col fixed bottom-0 w-full items-center pb-6 pt-2">
+        <div className="flex w-full shrink-0 flex-col items-center px-4 pb-6 pt-2">
           <p style={{ fontSize: "12px" }} className="text-gray-400 mb-3">
             {statusMessage}
           </p>
@@ -198,6 +199,6 @@ export function CameraView() {
 
         <InlineErrorMessage message={displayError} />
       </div>
-    </>
+    </div>
   );
 }
