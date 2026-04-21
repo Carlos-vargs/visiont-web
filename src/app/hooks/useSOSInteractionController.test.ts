@@ -11,19 +11,16 @@ const createAudioMock = () =>
     transcript: "",
     hasKnownMicrophoneAccess: false,
     lastAudioError: null,
-    isBackgroundListening: true,
     startListening: vi.fn().mockResolvedValue(true),
     stopListening: vi.fn(),
     startManualRecognition: vi.fn(() => true),
     stopManualRecognition: vi.fn(() => ""),
     stopAllAudio: vi.fn(),
     resetRecognition: vi.fn(),
-    startBackgroundRecognition: vi.fn(),
   }) as any;
 
 const createOptions = (overrides: Record<string, unknown> = {}) => ({
   audio: createAudioMock(),
-  wakeWords: ["ayuda"],
   processTranscript: vi.fn().mockResolvedValue(undefined),
   speakStatus: vi.fn().mockResolvedValue(undefined),
   onStatus: vi.fn(),
@@ -34,38 +31,7 @@ const createOptions = (overrides: Record<string, unknown> = {}) => ({
 
 describe("useSOSInteractionController", () => {
   beforeEach(() => {
-    vi.useFakeTimers();
     vi.clearAllMocks();
-  });
-
-  it("starts wake word background recognition once on mount", async () => {
-    const audio = createAudioMock();
-
-    renderHook(() => useSOSInteractionController(createOptions({ audio })));
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(500);
-    });
-
-    expect(audio.startBackgroundRecognition).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not create duplicate listening sessions from repeated wake activation", async () => {
-    const audio = createAudioMock();
-    let recognitionOptions: any;
-    audio.startBackgroundRecognition.mockImplementation((options: any) => {
-      recognitionOptions = options;
-    });
-
-    renderHook(() => useSOSInteractionController(createOptions({ audio })));
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(500);
-      recognitionOptions.onActivation();
-      recognitionOptions.onActivation();
-    });
-
-    expect(audio.startListening).toHaveBeenCalledTimes(1);
   });
 
   it("speaks preparing feedback before opening recognition and input", async () => {
@@ -96,7 +62,33 @@ describe("useSOSInteractionController", () => {
       "recognition",
       "input",
     ]);
-    expect(speakStatus).not.toHaveBeenCalledWith("Escuchando");
+    expect(result.current.mode).toBe("listening");
+    expect(result.current.statusMessage).toBe("Escuchando, toca para procesar");
+  });
+
+  it("second press stops listening and processes the captured transcript", async () => {
+    const audio = createAudioMock();
+    const processTranscript = vi.fn().mockResolvedValue(undefined);
+    audio.stopManualRecognition.mockImplementation(() => "llama a mamá");
+
+    const { result } = renderHook(() =>
+      useSOSInteractionController(
+        createOptions({ audio, processTranscript }),
+      ),
+    );
+
+    await act(async () => {
+      await result.current.handleMicPress();
+    });
+
+    await act(async () => {
+      await result.current.handleMicPress();
+    });
+
+    expect(audio.stopManualRecognition).toHaveBeenCalledTimes(1);
+    expect(audio.stopListening).toHaveBeenCalledTimes(1);
+    expect(processTranscript).toHaveBeenCalledWith("llama a mamá", 2);
+    expect(result.current.mode).toBe("idle");
   });
 
   it("manual button during processing cancels and remains stable", async () => {
@@ -119,11 +111,12 @@ describe("useSOSInteractionController", () => {
     await act(async () => {
       await result.current.handleMicPress();
     });
-    expect(result.current.mode).toBe("listening");
 
     await act(async () => {
       void result.current.handleMicPress();
+      await Promise.resolve();
     });
+
     expect(result.current.mode).toBe("processing");
 
     await act(async () => {
@@ -141,5 +134,24 @@ describe("useSOSInteractionController", () => {
     });
 
     expect(result.current.mode).toBe("idle");
+  });
+
+  it("reports unsupported recognition as a user-facing error", async () => {
+    const audio = createAudioMock();
+    audio.startManualRecognition.mockImplementation(() => false);
+    audio.lastAudioError = "Reconocimiento de voz no soportado en este navegador.";
+
+    const { result } = renderHook(() =>
+      useSOSInteractionController(createOptions({ audio })),
+    );
+
+    await act(async () => {
+      await result.current.handleMicPress();
+    });
+
+    expect(result.current.mode).toBe("error");
+    expect(result.current.errorMessage).toBe(
+      "Reconocimiento de voz no soportado en este navegador.",
+    );
   });
 });

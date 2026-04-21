@@ -5,6 +5,7 @@ type AudioLevelIndicatorProps = {
   hasRealAudioLevel: boolean;
   audioLevel: number;
   label?: string;
+  className?: string;
 };
 
 export function AudioLevelIndicator({
@@ -12,13 +13,16 @@ export function AudioLevelIndicator({
   hasRealAudioLevel,
   audioLevel,
   label = "Escuchando",
+  className = "",
 }: AudioLevelIndicatorProps) {
   if (!isListening) {
     return null;
   }
 
   return (
-    <div className="absolute top-3 left-3 bg-black/50 backdrop-blur-sm rounded-full px-3 py-1.5 flex items-center gap-2">
+    <div
+      className={`absolute top-3 left-3 flex items-center gap-2 rounded-full bg-black/50 px-3 py-1.5 backdrop-blur-sm ${className}`.trim()}
+    >
       <Mic size={12} className="text-red-400" />
       {hasRealAudioLevel ? (
         <div className="w-16 h-1.5 bg-white/20 rounded-full overflow-hidden">

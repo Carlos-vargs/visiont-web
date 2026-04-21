@@ -13,8 +13,6 @@ export type SOSInteractionMode =
 
 type UseSOSInteractionControllerOptions = {
   audio: AudioApi;
-  wakeWords: string[];
-  silenceTimeout?: number;
   processTranscript: (transcript: string, cycleId: number) => Promise<void>;
   speakStatus: (text: string) => Promise<void>;
   onStatus: (message: string) => void;
@@ -28,8 +26,6 @@ const PREPARING_MICROPHONE_MESSAGE = "Preparando micrófono";
 
 export function useSOSInteractionController({
   audio,
-  wakeWords,
-  silenceTimeout = 4000,
   processTranscript,
   speakStatus,
   onStatus,
@@ -37,16 +33,13 @@ export function useSOSInteractionController({
   onCycleChange,
 }: UseSOSInteractionControllerOptions) {
   const [mode, setMode] = useState<SOSInteractionMode>("idle");
-  const [statusMessage, setStatusMessage] = useState(
-    "Toca para habilitar comandos de voz",
-  );
+  const [statusMessage, setStatusMessage] = useState("Toca para hablar");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const modeRef = useRef<SOSInteractionMode>("idle");
   const cycleIdRef = useRef(0);
   const operationLockedRef = useRef(false);
   const audioRef = useRef(audio);
-  const startBackgroundRef = useRef<() => void>(() => undefined);
 
   useEffect(() => {
     modeRef.current = mode;
@@ -115,19 +108,20 @@ export function useSOSInteractionController({
         }
 
         const started = await audio.startListening();
+        let nextStatusMessage = message;
         if (!started && !audio.hasKnownMicrophoneAccess) {
-          setStatusMessage("Escuchando sin medidor de volumen");
+          nextStatusMessage = "Escuchando sin medidor de volumen";
         } else if (!started) {
           const recovery = audio.hasKnownMicrophoneAccess
             ? MICROPHONE_RECOVERY_MESSAGE
             : audio.lastAudioError || "No pude abrir el microfono.";
           setErrorMessage(recovery);
-          setStatusMessage("Escuchando sin medidor de volumen");
+          nextStatusMessage = "Escuchando sin medidor de volumen";
           void speakStatus(recovery);
         }
 
-        setModeState("listening", message);
-        onStatus(message);
+        setModeState("listening", nextStatusMessage);
+        onStatus(nextStatusMessage);
       } finally {
         operationLockedRef.current = false;
       }
@@ -167,8 +161,7 @@ export function useSOSInteractionController({
 
         if (cycleIdRef.current === cycleId) {
           audio.resetRecognition();
-          setModeState("idle", "Di un comando o toca para hablar");
-          startBackgroundRef.current();
+          setModeState("idle", "Toca para hablar");
         }
       } catch (err: any) {
         console.error("Error processing voice command:", err);
@@ -186,33 +179,6 @@ export function useSOSInteractionController({
     [audio, nextCycle, onStatus, processTranscript, setModeState, speakStatus],
   );
 
-  const startBackground = useCallback(() => {
-    audio.startBackgroundRecognition({
-      wakeWords,
-      silenceTimeout,
-      onActivation: () => {
-        if (modeRef.current === "idle" || modeRef.current === "error") {
-          void startVoiceListening("Escuchando comando de emergencia");
-        }
-      },
-      onSilence: (transcript: string) => {
-        if (modeRef.current === "listening") {
-          void executeVoiceCommand(transcript);
-        }
-      },
-    });
-  }, [
-    audio,
-    executeVoiceCommand,
-    silenceTimeout,
-    startVoiceListening,
-    wakeWords,
-  ]);
-
-  useEffect(() => {
-    startBackgroundRef.current = startBackground;
-  }, [startBackground]);
-
   const cancelCurrentInteraction = useCallback(async () => {
     if (modeRef.current === "cancelling") {
       return;
@@ -228,9 +194,8 @@ export function useSOSInteractionController({
     await speakStatus("Cancelando");
 
     operationLockedRef.current = false;
-    setModeState("idle", "Toca para habilitar comandos de voz");
-    startBackground();
-  }, [audio, nextCycle, onStatus, setModeState, speakStatus, startBackground]);
+    setModeState("idle", "Toca para hablar");
+  }, [audio, nextCycle, onStatus, setModeState, speakStatus]);
 
   const handleMicPress = useCallback(async () => {
     onBeforeManualStart?.();
@@ -259,12 +224,7 @@ export function useSOSInteractionController({
   ]);
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      startBackgroundRef.current();
-    }, 500);
-
     return () => {
-      clearTimeout(timer);
       audioRef.current.stopAllAudio("sos-unmount");
     };
   }, []);
@@ -277,12 +237,9 @@ export function useSOSInteractionController({
     errorMessage: displayError,
     isListening: mode === "listening",
     isProcessingVoice: mode === "processing",
-    isBackgroundListening: audio.isBackgroundListening,
     audioLevel: audio.inputStatus === "active" ? audio.audioLevel : 0,
     hasRealAudioLevel: audio.inputStatus === "active",
     handleMicPress,
     cancelCurrentInteraction,
-    startVoiceListening,
-    executeVoiceCommand,
   };
 }

@@ -1,11 +1,13 @@
 type TranscriptOverlayProps = {
   transcript: string;
   visible: boolean;
+  className?: string;
 };
 
 export function TranscriptOverlay({
   transcript,
   visible,
+  className = "",
 }: TranscriptOverlayProps) {
   if (!visible || !transcript) {
     return null;
@@ -13,7 +15,7 @@ export function TranscriptOverlay({
 
   return (
     <div
-      className="absolute left-4 bottom-4 bg-black bg-opacity-60 text-white px-4 py-2 rounded-xl shadow-lg z-50"
+      className={`absolute bottom-4 left-4 z-50 rounded-xl bg-black bg-opacity-60 px-4 py-2 text-white shadow-lg ${className}`.trim()}
       style={{ maxWidth: "70%", fontSize: 14, pointerEvents: "none" }}
       data-testid="transcript-overlay"
     >

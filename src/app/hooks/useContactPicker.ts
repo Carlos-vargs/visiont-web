@@ -8,6 +8,8 @@ import {
   requestNativeContactsPermission,
   type NativePermissionStatus,
 } from "../lib/nativeBridge";
+import { getInitials, normalizePhone } from "../utils/contacts";
+import { normalizeText } from "../utils/text";
 
 export type Contact = {
   id: string;
@@ -33,26 +35,6 @@ type ContactPickerNavigator = Navigator & {
 };
 
 const STORAGE_KEY = "sos-contacts";
-
-const normalizeText = (value: string): string =>
-  value
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-const getInitials = (name: string): string =>
-  name
-    .split(" ")
-    .filter(Boolean)
-    .map((part) => part[0])
-    .join("")
-    .toUpperCase()
-    .slice(0, 2);
-
-const normalizePhone = (phone: string): string => phone.replace(/[^\d+]/g, "");
 
 const hasBrowserContactPickerSupport = (): boolean => {
   if (typeof window === "undefined") {
