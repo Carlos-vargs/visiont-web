@@ -36,6 +36,9 @@ const isAbortError = (error: unknown) => {
 };
 
 export function useGemini() {
+  const apiKey = import.meta.env.VITE_GEMINI_API_KEY?.trim();
+  const geminiModel = import.meta.env.VITE_GEMINI_MODEL?.trim();
+
   const [isConnected, setIsConnected] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -94,8 +97,15 @@ export function useGemini() {
     [isCurrentRequest],
   );
 
+  const getGeminiModel = useCallback(() => {
+    if (!geminiModel) {
+      throw new Error("Modelo de Gemini no configurado");
+    }
+
+    return geminiModel;
+  }, [geminiModel]);
+
   useEffect(() => {
-    const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
     if (!apiKey) {
       setError("GEMINI_API_KEY no configurada. Agrega VITE_GEMINI_API_KEY a tu .env");
       sendDebugEvent({
@@ -103,6 +113,17 @@ export function useGemini() {
         source: "useGemini",
         level: "error",
         message: "VITE_GEMINI_API_KEY is not configured",
+      });
+      return;
+    }
+
+    if (!geminiModel) {
+      setError("GEMINI_MODEL no configurado. Agrega VITE_GEMINI_MODEL a tu .env");
+      sendDebugEvent({
+        type: "gemini.missing_model",
+        source: "useGemini",
+        level: "error",
+        message: "VITE_GEMINI_MODEL is not configured",
       });
       return;
     }
@@ -118,7 +139,7 @@ export function useGemini() {
     return () => {
       disconnect();
     };
-  }, []);
+  }, [apiKey, geminiModel]);
 
   const connectLiveSession = useCallback(async () => {
     if (!aiRef.current) {
@@ -196,7 +217,7 @@ Mantén las respuestas informativas pero breves (2-3 oraciones máximo para feed
         }));
 
         const response = await aiRef.current.models.generateContent({
-          model: "gemini-2.5-flash",
+          model: getGeminiModel(),
           config: { abortSignal: controller.signal },
           contents: [
             ...chatHistory,
@@ -244,7 +265,7 @@ Mantén las respuestas informativas pero breves (2-3 oraciones máximo para feed
         finishRequest(requestId, controller);
       }
     },
-    [beginRequest, finishRequest, isCurrentRequest, messages]
+    [beginRequest, finishRequest, getGeminiModel, isCurrentRequest, messages]
   );
 
   const sendImageWithPrompt = useCallback(
@@ -284,7 +305,7 @@ Mantén las respuestas informativas pero breves (2-3 oraciones máximo para feed
         });
 
         const response = await aiRef.current.models.generateContent({
-          model: "gemini-2.5-flash",
+          model: getGeminiModel(),
           config: { abortSignal: controller.signal },
           contents: [
             {
@@ -385,7 +406,7 @@ Proporciona coordenadas aproximadas (x, y como porcentaje de la imagen desde la 
         finishRequest(requestId, controller);
       }
     },
-    [beginRequest, finishRequest, isCurrentRequest]
+    [beginRequest, finishRequest, getGeminiModel, isCurrentRequest]
   );
 
   const sendRealtimeAudio = useCallback(async () => {
@@ -442,7 +463,7 @@ Proporciona coordenadas aproximadas (x, y como porcentaje de la imagen desde la 
         }
 
         const response = await aiRef.current.models.generateContent({
-          model: "gemini-2.5-flash",
+          model: getGeminiModel(),
           config: { abortSignal: controller.signal },
           contents,
         });
@@ -483,7 +504,7 @@ Proporciona coordenadas aproximadas (x, y como porcentaje de la imagen desde la 
         finishRequest(requestId, controller);
       }
     },
-    [beginRequest, finishRequest, isCurrentRequest]
+    [beginRequest, finishRequest, getGeminiModel, isCurrentRequest]
   );
 
   const disconnect = useCallback(() => {

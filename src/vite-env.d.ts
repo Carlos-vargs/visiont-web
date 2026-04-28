@@ -6,6 +6,7 @@ interface ImportMetaEnv {
   readonly VITE_DEBUG_SLACK_CAPTURE_IMAGES?: string;
   readonly VITE_ENVIRONMENT?: string;
   readonly VITE_GEMINI_API_KEY?: string;
+  readonly VITE_GEMINI_MODEL?: string;
 }
 
 interface ImportMeta {
