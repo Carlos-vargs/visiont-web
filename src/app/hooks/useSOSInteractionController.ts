@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { useAudio } from "./useAudio";
+import { sendDebugEvent } from "../lib/debugTelemetry";
 
 type AudioApi = ReturnType<typeof useAudio>;
 
@@ -40,6 +41,7 @@ export function useSOSInteractionController({
   const cycleIdRef = useRef(0);
   const operationLockedRef = useRef(false);
   const audioRef = useRef(audio);
+  const lastStateRef = useRef<string | null>(null);
 
   useEffect(() => {
     modeRef.current = mode;
@@ -48,6 +50,30 @@ export function useSOSInteractionController({
   useEffect(() => {
     audioRef.current = audio;
   }, [audio]);
+
+  useEffect(() => {
+    const snapshot = JSON.stringify({
+      mode,
+      statusMessage,
+      errorMessage,
+    });
+
+    if (lastStateRef.current === snapshot) {
+      return;
+    }
+
+    lastStateRef.current = snapshot;
+    sendDebugEvent({
+      type: "sos.state_changed",
+      source: "useSOSInteractionController",
+      message: "SOS interaction state changed",
+      payload: {
+        mode,
+        statusMessage,
+        errorMessage,
+      },
+    });
+  }, [errorMessage, mode, statusMessage]);
 
   const setModeState = useCallback(
     (nextMode: SOSInteractionMode, message?: string) => {

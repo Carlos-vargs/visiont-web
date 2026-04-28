@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { useAudio } from "./useAudio";
+import { sendDebugEvent } from "../lib/debugTelemetry";
 
 type AudioApi = ReturnType<typeof useAudio>;
 
@@ -95,6 +96,7 @@ export function useVoiceInteractionController({
     null,
   );
   const cleanupDepsRef = useRef({ audio, cancelActiveRequest });
+  const lastViewStateRef = useRef<string | null>(null);
 
   useEffect(() => {
     modeRef.current = mode;
@@ -110,6 +112,30 @@ export function useVoiceInteractionController({
       setMode((current) => (current === "idle" ? "error" : current));
     }
   }, [audio.error, cameraError, geminiError]);
+
+  useEffect(() => {
+    const snapshot = JSON.stringify({
+      mode,
+      statusMessage,
+      errorMessage,
+    });
+
+    if (lastViewStateRef.current === snapshot) {
+      return;
+    }
+
+    lastViewStateRef.current = snapshot;
+    sendDebugEvent({
+      type: "voice.state_changed",
+      source: "useVoiceInteractionController",
+      message: "Voice interaction state changed",
+      payload: {
+        mode,
+        statusMessage,
+        errorMessage,
+      },
+    });
+  }, [errorMessage, mode, statusMessage]);
 
   const setModeState = useCallback(
     (nextMode: VoiceInteractionMode, message?: string) => {
@@ -291,6 +317,12 @@ export function useVoiceInteractionController({
   const handleQuickAction = useCallback(
     async (action: string) => {
       if (action === "camera") {
+        sendDebugEvent({
+          type: "voice.quick_action",
+          source: "useVoiceInteractionController",
+          message: "Voice quick action triggered",
+          payload: { action },
+        });
         if (cameraCaptureTimerRef.current) {
           clearTimeout(cameraCaptureTimerRef.current);
           cameraCaptureTimerRef.current = null;
@@ -315,6 +347,12 @@ export function useVoiceInteractionController({
         return;
       }
 
+      sendDebugEvent({
+        type: "voice.quick_action",
+        source: "useVoiceInteractionController",
+        message: "Voice quick action triggered",
+        payload: { action },
+      });
       if (modeRef.current === "loading" || modeRef.current === "speaking") {
         await cancelCurrentInteraction();
       }

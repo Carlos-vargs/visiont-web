@@ -1,5 +1,17 @@
 /// <reference types="vite/client" />
 
+interface ImportMetaEnv {
+  readonly VITE_DEBUG_SLACK_ENABLED?: string;
+  readonly VITE_DEBUG_SLACK_ENDPOINT?: string;
+  readonly VITE_DEBUG_SLACK_CAPTURE_IMAGES?: string;
+  readonly VITE_ENVIRONMENT?: string;
+  readonly VITE_GEMINI_API_KEY?: string;
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv;
+}
+
 declare module "*.css";
 declare module "react-dom/client";
 

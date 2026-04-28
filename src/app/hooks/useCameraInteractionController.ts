@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { useAudio } from "./useAudio";
+import { sendDebugEvent } from "../lib/debugTelemetry";
 
 type AudioApi = ReturnType<typeof useAudio>;
 
@@ -82,10 +83,37 @@ export function useCameraInteractionController({
   const cycleIdRef = useRef(0);
   const operationLockedRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const lastStateRef = useRef<string | null>(null);
 
   useEffect(() => {
     modeRef.current = mode;
   }, [mode]);
+
+  useEffect(() => {
+    const snapshot = JSON.stringify({
+      mode,
+      statusMessage,
+      errorMessage,
+      activeBoxes: activeBoxes.length,
+    });
+
+    if (lastStateRef.current === snapshot) {
+      return;
+    }
+
+    lastStateRef.current = snapshot;
+    sendDebugEvent({
+      type: "camera_interaction.state_changed",
+      source: "useCameraInteractionController",
+      message: "Camera interaction state changed",
+      payload: {
+        mode,
+        statusMessage,
+        errorMessage,
+        activeBoxes,
+      },
+    });
+  }, [activeBoxes, errorMessage, mode, statusMessage]);
 
   const setModeState = useCallback(
     (nextMode: CameraInteractionMode, message?: string) => {

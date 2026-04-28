@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
+import { sendDebugEvent, serializeError } from "../lib/debugTelemetry";
 
 type CameraOptions = {
   width?: number;
@@ -65,6 +66,7 @@ export function useCamera(options: CameraOptions = {}) {
       }
 
       streamRef.current = stream;
+      let hasTorch = false;
 
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
@@ -77,18 +79,30 @@ export function useCamera(options: CameraOptions = {}) {
 
            // Correctly check if torch (flash) is available (live video flash)
            const capabilities = videoTrack.getCapabilities() as any;
-           const hasTorch = "torch" in capabilities &&
-             (Array.isArray(capabilities.torch)
-               ? capabilities.torch.includes(true)
-               : !!capabilities.torch);
-           setFlashAvailable(hasTorch);
-         }
+           hasTorch = "torch" in capabilities &&
+            (Array.isArray(capabilities.torch)
+              ? capabilities.torch.includes(true)
+              : !!capabilities.torch);
+          setFlashAvailable(hasTorch);
+        }
       } else {
         console.warn("[useCamera] videoRef.current is null when assigning stream! Video element must be rendered in DOM.");
       }
 
       setIsActive(true);
       setPermissionGranted(true);
+      sendDebugEvent({
+        type: "camera.started",
+        source: "useCamera",
+        message: "Camera started",
+        payload: {
+          width,
+          height,
+          facingMode,
+          frameRate,
+          flashAvailable: hasTorch,
+        },
+      });
     } catch (err: any) {
       const errorMsg =
         err.name === "NotAllowedError"
@@ -100,10 +114,24 @@ export function useCamera(options: CameraOptions = {}) {
       setError(errorMsg);
       setIsActive(false);
       setPermissionGranted(false);
+      sendDebugEvent({
+        type: "camera.start_error",
+        source: "useCamera",
+        level: "error",
+        message: errorMsg,
+        payload: serializeError(err),
+      });
     }
   }, []); // Empty deps - uses optionsRef.current
 
   const stopCamera = useCallback(() => {
+    if (streamRef.current || isActive) {
+      sendDebugEvent({
+        type: "camera.stopped",
+        source: "useCamera",
+        message: "Camera stopped",
+      });
+    }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
@@ -115,7 +143,7 @@ export function useCamera(options: CameraOptions = {}) {
     setIsActive(false);
     setFlashAvailable(false);
     setFlashOn(false);
-  }, []);
+  }, [isActive]);
 
   // Toggle flash on/off
   const toggleFlash = useCallback(async () => {
@@ -137,6 +165,12 @@ export function useCamera(options: CameraOptions = {}) {
           advanced: [{ torch: newFlashState } as any],
         });
         setFlashOn(newFlashState);
+        sendDebugEvent({
+          type: "camera.flash_toggled",
+          source: "useCamera",
+          message: "Camera flash toggled",
+          payload: { flashOn: newFlashState },
+        });
         return newFlashState;
       }
 
@@ -145,6 +179,13 @@ export function useCamera(options: CameraOptions = {}) {
       return false;
     } catch (err) {
       console.error("[useCamera] Error toggling flash:", err);
+      sendDebugEvent({
+        type: "camera.flash_error",
+        source: "useCamera",
+        level: "error",
+        message: "Error toggling flash",
+        payload: serializeError(err),
+      });
       return false;
     }
   }, [flashOn]);
@@ -199,22 +240,22 @@ export function useCamera(options: CameraOptions = {}) {
     [captureFrame]
   );
 
-const requestCameraPermission = useCallback(async () => {
-  try {
-    // Intentar obtener acceso a la cámara
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: true,
-    });
+  const requestCameraPermission = useCallback(async () => {
+    try {
+      // Intentar obtener acceso a la cámara
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+      });
 
-    // Detener inmediatamente después de obtener permiso
-    stream.getTracks().forEach((track) => track.stop());
-    setPermissionGranted(true);
-    return true;
-  } catch (err) {
-    setPermissionGranted(false);
-    return false;
-  }
-}, []);
+      // Detener inmediatamente después de obtener permiso
+      stream.getTracks().forEach((track) => track.stop());
+      setPermissionGranted(true);
+      return true;
+    } catch (err) {
+      setPermissionGranted(false);
+      return false;
+    }
+  }, []);
 
   // Cleanup al desmontar
   useEffect(() => {

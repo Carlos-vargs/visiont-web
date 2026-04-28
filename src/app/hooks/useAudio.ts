@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from "react";
+import { sendDebugEvent, serializeError } from "../lib/debugTelemetry";
 
 type AudioOptions = {
   sendSampleRate?: number;
@@ -345,6 +346,7 @@ export function useAudio(options: AudioOptions = {}) {
   const hasKnownMicrophoneAccessRef = useRef(
     Boolean(readMicrophonePermissionCache()),
   );
+  const lastReportedErrorRef = useRef<string | null>(null);
 
   // Playback
   const playbackContextRef = useRef<AudioContext | null>(null);
@@ -437,6 +439,38 @@ export function useAudio(options: AudioOptions = {}) {
     setError(message);
     setLastAudioError(message);
   }, []);
+
+  useEffect(() => {
+    if (!error) {
+      lastReportedErrorRef.current = null;
+      return;
+    }
+
+    const snapshot = JSON.stringify({
+      error,
+      inputStatus,
+      recognitionStatus,
+      speechStatus,
+    });
+
+    if (lastReportedErrorRef.current === snapshot) {
+      return;
+    }
+
+    lastReportedErrorRef.current = snapshot;
+
+    sendDebugEvent({
+      type: "audio.error",
+      source: "useAudio",
+      level: "error",
+      message: error,
+      payload: {
+        inputStatus,
+        recognitionStatus,
+        speechStatus,
+      },
+    });
+  }, [error, inputStatus, recognitionStatus, speechStatus]);
 
   const cleanupInput = useCallback(() => {
     audioGenerationRef.current += 1;
@@ -571,6 +605,16 @@ export function useAudio(options: AudioOptions = {}) {
           setInputStatus("active");
           setPermissionGranted(true);
           setPermissionStatus("granted");
+          sendDebugEvent({
+            type: "audio.input_started",
+            source: "useAudio",
+            message: "Microphone input started",
+            payload: {
+              sampleRate: sendSampleRate,
+              chunkSize,
+              enableEchoCancellation,
+            },
+          });
           return true;
         } catch (err: any) {
           const hadKnownAccess =
@@ -589,6 +633,13 @@ export function useAudio(options: AudioOptions = {}) {
           setInputStatus(isBlocked ? "blocked" : "error");
           cleanupInput();
           setInputStatus(isBlocked ? "blocked" : "error");
+          sendDebugEvent({
+            type: "audio.input_error",
+            source: "useAudio",
+            level: "error",
+            message: msg,
+            payload: serializeError(err),
+          });
           return false;
         } finally {
           isStartingRef.current = false;
@@ -611,6 +662,13 @@ export function useAudio(options: AudioOptions = {}) {
   );
 
   const stopListening = useCallback(() => {
+    if (isListeningRef.current) {
+      sendDebugEvent({
+        type: "audio.input_stopped",
+        source: "useAudio",
+        message: "Microphone input stopped",
+      });
+    }
     cleanupInput();
   }, [cleanupInput]);
 
@@ -689,6 +747,12 @@ export function useAudio(options: AudioOptions = {}) {
     isVoiceActiveRef.current = false;
     setIsVoiceActive(false);
     setIsVoiceProcessing(true);
+    sendDebugEvent({
+      type: "audio.background_transcript",
+      source: "useAudio",
+      message: "Background voice transcript captured",
+      payload: { transcript: captured },
+    });
     onSilence?.(captured);
     setIsVoiceProcessing(false);
   }, [getRecognitionOptions]);
@@ -763,6 +827,12 @@ export function useAudio(options: AudioOptions = {}) {
           setIsVoiceActive(true);
           resetTranscript();
           onActivation?.();
+          sendDebugEvent({
+            type: "audio.wake_word_detected",
+            source: "useAudio",
+            message: "Wake word detected",
+            payload: { transcript: full.trim() },
+          });
         }
 
         if (isVoiceActiveRef.current) {
@@ -803,6 +873,13 @@ export function useAudio(options: AudioOptions = {}) {
 
         console.warn("[useAudio] SpeechRecognition error:", event.error);
         setRecognitionStatus("error");
+        sendDebugEvent({
+          type: "audio.recognition_error",
+          source: "useAudio",
+          level: "error",
+          message: `SpeechRecognition error: ${event.error}`,
+          payload: { error: event.error },
+        });
       };
 
       recognition.onend = () => {
@@ -887,6 +964,11 @@ export function useAudio(options: AudioOptions = {}) {
       isRecognitionStartingRef.current = true;
       try {
         recognition.start();
+        sendDebugEvent({
+          type: "audio.background_recognition_started",
+          source: "useAudio",
+          message: "Background speech recognition started",
+        });
       } catch (err: any) {
         isBackgroundListeningRef.current = false;
         isRecognitionStartingRef.current = false;
@@ -895,6 +977,13 @@ export function useAudio(options: AudioOptions = {}) {
         setIsBackgroundListening(false);
         setRecognitionStatus("error");
         setAudioError(`Error al iniciar reconocimiento: ${err.message}`);
+        sendDebugEvent({
+          type: "audio.background_recognition_error",
+          source: "useAudio",
+          level: "error",
+          message: err.message || "Error al iniciar reconocimiento",
+          payload: serializeError(err),
+        });
       }
     },
     [buildRecognition, setAudioError],
@@ -943,6 +1032,11 @@ export function useAudio(options: AudioOptions = {}) {
       isRecognitionStartingRef.current = true;
       try {
         recognition.start();
+        sendDebugEvent({
+          type: "audio.manual_recognition_started",
+          source: "useAudio",
+          message: "Manual speech recognition started",
+        });
         return true;
       } catch (err: any) {
         isRecognitionStartingRef.current = false;
@@ -951,6 +1045,13 @@ export function useAudio(options: AudioOptions = {}) {
         setIsManualListening(false);
         setRecognitionStatus("error");
         setAudioError(`Error al iniciar reconocimiento: ${err.message}`);
+        sendDebugEvent({
+          type: "audio.manual_recognition_error",
+          source: "useAudio",
+          level: "error",
+          message: err.message || "Error al iniciar reconocimiento",
+          payload: serializeError(err),
+        });
         return false;
       }
     },
@@ -974,6 +1075,16 @@ export function useAudio(options: AudioOptions = {}) {
 
     setIsManualListening(false);
     setRecognitionStatus("idle");
+
+    if (captured) {
+      sendDebugEvent({
+        type: "audio.manual_transcript",
+        source: "useAudio",
+        message: "Manual voice transcript captured",
+        payload: { transcript: captured },
+      });
+    }
+
     return captured;
   }, []);
 
@@ -1090,12 +1201,25 @@ export function useAudio(options: AudioOptions = {}) {
         if (!isPlayingRef.current) {
           isPlayingRef.current = true;
           setIsSpeaking(true);
+          sendDebugEvent({
+            type: "audio.playback_started",
+            source: "useAudio",
+            message: "PCM audio playback started",
+            payload: { sampleRate: receiveSampleRate },
+          });
           await processPlaybackQueue(ctx);
         }
       } catch (err: any) {
         setError(`Error al reproducir audio: ${err.message}`);
         setIsSpeaking(false);
         isPlayingRef.current = false;
+        sendDebugEvent({
+          type: "audio.playback_error",
+          source: "useAudio",
+          level: "error",
+          message: err.message || "Error al reproducir audio",
+          payload: serializeError(err),
+        });
       }
     },
     [receiveSampleRate, processPlaybackQueue]
@@ -1206,6 +1330,12 @@ export function useAudio(options: AudioOptions = {}) {
         return;
       }
       return new Promise<void>((resolve) => {
+        sendDebugEvent({
+          type: "audio.speech_enqueued",
+          source: "useAudio",
+          message: "Speech synthesis queued",
+          payload: { text },
+        });
         speechQueueRef.current.push({
           text,
           resolve,
@@ -1225,6 +1355,11 @@ export function useAudio(options: AudioOptions = {}) {
    */
   const cancelSpeech = useCallback(() => {
     speechGenerationRef.current += 1;
+    sendDebugEvent({
+      type: "audio.speech_cancelled",
+      source: "useAudio",
+      message: "Speech synthesis cancelled",
+    });
 
     // Resolve and discard all pending items
     const pending = speechQueueRef.current.splice(0);
@@ -1244,6 +1379,12 @@ export function useAudio(options: AudioOptions = {}) {
 
   const stopAllAudio = useCallback(
     (_reason?: string) => {
+      sendDebugEvent({
+        type: "audio.stop_all",
+        source: "useAudio",
+        message: "All audio activity stopped",
+        payload: { reason: _reason },
+      });
       audioGenerationRef.current += 1;
       recognitionGenerationRef.current += 1;
       stopBackgroundRecognition();

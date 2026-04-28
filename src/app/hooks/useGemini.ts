@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { GoogleGenAI } from "@google/genai";
+import { sendDebugEvent, serializeError } from "../lib/debugTelemetry";
 
 type GeminiMessage = {
   role: "user" | "model";
@@ -39,10 +40,18 @@ export function useGemini() {
   const activeRequestIdRef = useRef(0);
 
   const cancelActiveRequest = useCallback(() => {
+    const hadActiveRequest = Boolean(abortControllerRef.current);
     activeRequestIdRef.current += 1;
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
     setIsLoading(false);
+    if (hadActiveRequest) {
+      sendDebugEvent({
+        type: "gemini.request_cancelled",
+        source: "useGemini",
+        message: "Active Gemini request cancelled",
+      });
+    }
   }, []);
 
   const beginRequest = useCallback(() => {
@@ -81,11 +90,22 @@ export function useGemini() {
     const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
     if (!apiKey) {
       setError("GEMINI_API_KEY no configurada. Agrega VITE_GEMINI_API_KEY a tu .env");
+      sendDebugEvent({
+        type: "gemini.missing_api_key",
+        source: "useGemini",
+        level: "error",
+        message: "VITE_GEMINI_API_KEY is not configured",
+      });
       return;
     }
 
     aiRef.current = new GoogleGenAI({ apiKey });
     setIsConnected(true);
+    sendDebugEvent({
+      type: "gemini.client_initialized",
+      source: "useGemini",
+      message: "Gemini client initialized",
+    });
 
     return () => {
       disconnect();
@@ -123,8 +143,20 @@ Mantén las respuestas informativas pero breves (2-3 oraciones máximo para feed
       // Por ahora usamos generateContent con streaming
       liveSessionRef.current = { config };
       setIsConnected(true);
+      sendDebugEvent({
+        type: "gemini.live_session_connected",
+        source: "useGemini",
+        message: "Gemini live session configured",
+      });
     } catch (err: any) {
       setError(`Error al conectar: ${err.message}`);
+      sendDebugEvent({
+        type: "gemini.live_session_error",
+        source: "useGemini",
+        level: "error",
+        message: err.message || "Error al conectar",
+        payload: serializeError(err),
+      });
     } finally {
       setIsLoading(false);
     }
@@ -142,6 +174,12 @@ Mantén las respuestas informativas pero breves (2-3 oraciones máximo para feed
         // Agregar mensaje del usuario al historial
         const userMsg: GeminiMessage = { role: "user", text };
         setMessages((prev) => [...prev, userMsg]);
+        sendDebugEvent({
+          type: "gemini.text_request",
+          source: "useGemini",
+          message: "Text prompt sent to Gemini",
+          payload: { text },
+        });
 
         // Preparar el historial de mensajes para contexto
         const chatHistory = messages.map((msg) => ({
@@ -169,6 +207,12 @@ Mantén las respuestas informativas pero breves (2-3 oraciones máximo para feed
         // Agregar respuesta del modelo al historial
         const modelMsg: GeminiMessage = { role: "model", text: responseText };
         setMessages((prev) => [...prev, modelMsg]);
+        sendDebugEvent({
+          type: "gemini.text_response",
+          source: "useGemini",
+          message: "Text response received from Gemini",
+          payload: { text: responseText },
+        });
 
         return responseText;
       } catch (err: any) {
@@ -180,6 +224,13 @@ Mantén las respuestas informativas pero breves (2-3 oraciones máximo para feed
         if (isCurrentRequest(requestId, controller)) {
           setError(errorMsg);
         }
+        sendDebugEvent({
+          type: "gemini.text_error",
+          source: "useGemini",
+          level: "error",
+          message: errorMsg,
+          payload: serializeError(err),
+        });
         throw err;
       } finally {
         finishRequest(requestId, controller);
@@ -200,6 +251,19 @@ Mantén las respuestas informativas pero breves (2-3 oraciones máximo para feed
       const { controller, requestId } = beginRequest();
 
       try {
+        sendDebugEvent({
+          type: "gemini.image_request",
+          source: "useGemini",
+          message: "Image prompt sent to Gemini",
+          payload: {
+            prompt,
+            imageBytesBase64Length: imageBase64.length,
+          },
+          imageBase64,
+          imageMimeType: "image/jpeg",
+          imageFilename: `visiont-analysis-${Date.now()}.jpg`,
+        });
+
         const response = await aiRef.current.models.generateContent({
           model: "gemini-2.5-flash",
           config: { abortSignal: controller.signal },
@@ -273,6 +337,12 @@ Proporciona coordenadas aproximadas (x, y como porcentaje de la imagen desde la 
           text: parsed.feedback,
         };
         setMessages((prev) => [...prev, modelMsg]);
+        sendDebugEvent({
+          type: "gemini.image_response",
+          source: "useGemini",
+          message: "Image response received from Gemini",
+          payload: parsed,
+        });
 
         return parsed;
       } catch (err: any) {
@@ -284,6 +354,13 @@ Proporciona coordenadas aproximadas (x, y como porcentaje de la imagen desde la 
         if (isCurrentRequest(requestId, controller)) {
           setError(errorMsg);
         }
+        sendDebugEvent({
+          type: "gemini.image_error",
+          source: "useGemini",
+          level: "error",
+          message: errorMsg,
+          payload: serializeError(err),
+        });
         throw err;
       } finally {
         finishRequest(requestId, controller);
@@ -298,6 +375,12 @@ Proporciona coordenadas aproximadas (x, y como porcentaje de la imagen desde la 
     // Por ahora, esta función está placeholder para futura implementación
     // con la API de Live streaming completa cuando esté disponible
     console.warn("Audio realtime streaming no disponible aún en web SDK");
+    sendDebugEvent({
+      type: "gemini.realtime_audio_unavailable",
+      source: "useGemini",
+      level: "warn",
+      message: "Realtime audio streaming is not available in the web SDK yet",
+    });
   }, []);
 
   const sendAudioChunk = useCallback(
@@ -309,6 +392,17 @@ Proporciona coordenadas aproximadas (x, y como porcentaje de la imagen desde la 
       const { controller, requestId } = beginRequest();
 
       try {
+        sendDebugEvent({
+          type: "gemini.audio_request",
+          source: "useGemini",
+          message: "Audio prompt sent to Gemini",
+          payload: {
+            hasAudio: Boolean(audioBase64),
+            audioBytesBase64Length: audioBase64?.length || 0,
+            transcription,
+          },
+        });
+
         // Enviar audio como parte del mensaje
         // Gemini 2.5 Flash puede procesar audio directamente
         const contents: any[] = [];
@@ -341,6 +435,12 @@ Proporciona coordenadas aproximadas (x, y como porcentaje de la imagen desde la 
 
         const modelMsg: GeminiMessage = { role: "model", text: responseText };
         setMessages((prev) => [...prev, modelMsg]);
+        sendDebugEvent({
+          type: "gemini.audio_response",
+          source: "useGemini",
+          message: "Audio response received from Gemini",
+          payload: { text: responseText },
+        });
 
         return responseText;
       } catch (err: any) {
@@ -352,6 +452,13 @@ Proporciona coordenadas aproximadas (x, y como porcentaje de la imagen desde la 
         if (isCurrentRequest(requestId, controller)) {
           setError(errorMsg);
         }
+        sendDebugEvent({
+          type: "gemini.audio_error",
+          source: "useGemini",
+          level: "error",
+          message: errorMsg,
+          payload: serializeError(err),
+        });
         throw err;
       } finally {
         finishRequest(requestId, controller);
@@ -365,6 +472,11 @@ Proporciona coordenadas aproximadas (x, y como porcentaje de la imagen desde la 
     liveSessionRef.current = null;
     audioInputQueueRef.current = [];
     setIsConnected(false);
+    sendDebugEvent({
+      type: "gemini.disconnected",
+      source: "useGemini",
+      message: "Gemini client disconnected",
+    });
   }, [cancelActiveRequest]);
 
   const clearHistory = useCallback(() => {
