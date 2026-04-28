@@ -18,14 +18,13 @@ type DetectionResult = {
   h: number;
 };
 
-type GeminiResponse = {
+export type GeminiResponse = {
   feedback: string;
   detections: DetectionResult[];
 };
 
-type GeminiImageMetadata = Pick<
-  CapturedFrame,
-  "width" | "height" | "mimeType"
+export type GeminiImageMetadata = Partial<
+  Pick<CapturedFrame, "width" | "height" | "mimeType">
 > & {
   captureSource?: "analysis";
   imageFilename?: string;

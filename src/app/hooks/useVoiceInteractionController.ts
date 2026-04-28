@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { useAudio } from "./useAudio";
 import { sendDebugEvent } from "../lib/debugTelemetry";
 import type { CapturedFrame } from "./useCamera";
+import type { GeminiImageMetadata } from "./useGemini";
 
 type AudioApi = ReturnType<typeof useAudio>;
 
@@ -41,13 +42,7 @@ type UseVoiceInteractionControllerOptions = {
   sendImageWithPrompt: (
     imageBase64: string,
     prompt: string,
-    imageMetadata?: {
-      width?: number;
-      height?: number;
-      mimeType?: "image/jpeg";
-      captureSource?: "analysis";
-      imageFilename?: string;
-    },
+    imageMetadata?: GeminiImageMetadata,
   ) => Promise<GeminiImageResponse>;
   cancelActiveRequest: () => void;
 };
