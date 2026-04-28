@@ -17,6 +17,9 @@ type DebugEventRequest = DebugEventInput & {
   sessionId: string;
   threadTs?: string;
   userAgent?: string;
+  hasImageAttachment?: boolean;
+  imageBase64Length?: number;
+  imageCaptureEnabled?: boolean;
 };
 
 const DEBUG_SESSION_KEY = "visiont:debug-session-id";
@@ -126,16 +129,21 @@ const reportSendFailure = (error: unknown) => {
 };
 
 const sendDebugEventInternal = async (event: DebugEventInput) => {
+  const imageCaptureEnabled = isImageCaptureEnabled();
+  const includedImageBase64 =
+    imageCaptureEnabled || !event.imageBase64 ? event.imageBase64 : undefined;
   const payload: DebugEventRequest = {
     ...event,
-    imageBase64:
-      isImageCaptureEnabled() || !event.imageBase64 ? event.imageBase64 : undefined,
+    imageBase64: includedImageBase64,
     occurredAt: new Date().toISOString(),
     route: getRoute(),
     sessionId: getSessionId(),
     threadTs: getThreadTs(),
     userAgent:
       typeof navigator === "undefined" ? FALLBACK_USER_AGENT : navigator.userAgent,
+    hasImageAttachment: Boolean(includedImageBase64),
+    imageBase64Length: includedImageBase64?.length,
+    imageCaptureEnabled,
   };
 
   const response = await fetch(getDebugEndpoint(), {

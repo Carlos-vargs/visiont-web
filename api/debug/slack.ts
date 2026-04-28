@@ -16,6 +16,9 @@ type DebugRequestBody = {
   sessionId?: string;
   threadTs?: string;
   userAgent?: string;
+  hasImageAttachment?: boolean;
+  imageBase64Length?: number;
+  imageCaptureEnabled?: boolean;
 };
 
 const getEnv = (name: string) => process.env[name]?.trim();
@@ -89,6 +92,16 @@ const slackApi = async (token: string, method: string, body: Record<string, unkn
   }
 
   return parsed;
+};
+
+const stripDataUrlPrefix = (value: string) => {
+  const trimmed = value.trim();
+  const commaIndex = trimmed.indexOf(",");
+  if (trimmed.startsWith("data:") && commaIndex >= 0) {
+    return trimmed.slice(commaIndex + 1);
+  }
+
+  return trimmed;
 };
 
 const uploadFileToSlack = async ({
@@ -167,6 +180,20 @@ const buildEventMessage = (body: DebugRequestBody, payloadText?: string) => {
 
   if (body.message) {
     lines.push(`message: ${escapeSlackText(body.message)}`);
+  }
+
+  if (body.type === "gemini.image_request") {
+    lines.push(
+      `imageAttached: \`${body.hasImageAttachment ? "true" : "false"}\``,
+    );
+    if (typeof body.imageBase64Length === "number") {
+      lines.push(`imageBytesBase64Length: \`${String(body.imageBase64Length)}\``);
+    }
+    if (typeof body.imageCaptureEnabled === "boolean") {
+      lines.push(
+        `imageCaptureEnabled: \`${body.imageCaptureEnabled ? "true" : "false"}\``,
+      );
+    }
   }
 
   if (payloadText && payloadText.length <= MAX_INLINE_PAYLOAD_LENGTH) {
@@ -252,25 +279,64 @@ export default async function handler(req: any, res: any) {
       });
     }
 
+    if (body.type === "gemini.image_request" && !body.imageBase64) {
+      await slackApi(token, "chat.postMessage", {
+        channel: channelId,
+        thread_ts: threadTs,
+        text: [
+          "*visiont.debug_image_missing*",
+          `message: ${escapeSlackText(
+            "El evento de imagen llegó sin el binario adjunto.",
+          )}`,
+          `imageCaptureEnabled: \`${escapeSlackText(
+            String(body.imageCaptureEnabled),
+          )}\``,
+          `hasImageAttachment: \`${escapeSlackText(
+            String(body.hasImageAttachment),
+          )}\``,
+          "check: `VITE_DEBUG_SLACK_CAPTURE_IMAGES`, serialización del cliente y límites del request",
+        ].join("\n"),
+        mrkdwn: true,
+      });
+    }
+
     if (body.imageBase64) {
-      const imageBytes = Buffer.from(body.imageBase64, "base64");
+      const normalizedImageBase64 = stripDataUrlPrefix(body.imageBase64);
+      const imageBytes = Buffer.from(normalizedImageBase64, "base64");
       const imageExtension =
         body.imageMimeType?.split("/")[1]?.split(";")[0] || "jpg";
       const imageFilename =
         body.imageFilename ||
         `${body.type || "visiont-image"}-${Date.now()}.${imageExtension}`;
 
-      await uploadFileToSlack({
-        token,
-        channelId,
-        threadTs,
-        bytes: imageBytes,
-        mimeType: body.imageMimeType || "image/jpeg",
-        filename: imageFilename,
-        title: imageFilename,
-        initialComment: "Frame enviado a Gemini para análisis",
-        altText: body.message,
-      });
+      try {
+        await uploadFileToSlack({
+          token,
+          channelId,
+          threadTs,
+          bytes: imageBytes,
+          mimeType: body.imageMimeType || "image/jpeg",
+          filename: imageFilename,
+          title: imageFilename,
+          initialComment: "Frame enviado a Gemini para análisis",
+          altText: body.message,
+        });
+      } catch (imageUploadError: any) {
+        await slackApi(token, "chat.postMessage", {
+          channel: channelId,
+          thread_ts: threadTs,
+          text: [
+            "*visiont.debug_image_upload_error*",
+            `message: ${escapeSlackText(
+              imageUploadError?.message || "No se pudo subir la imagen a Slack.",
+            )}`,
+            `filename: \`${escapeSlackText(imageFilename)}\``,
+            `mimeType: \`${escapeSlackText(body.imageMimeType || "image/jpeg")}\``,
+            `imageBytesBase64Length: \`${String(normalizedImageBase64.length)}\``,
+          ].join("\n"),
+          mrkdwn: true,
+        });
+      }
     }
 
     return res.status(200).json({ ok: true, threadTs });
