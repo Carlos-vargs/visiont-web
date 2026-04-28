@@ -150,7 +150,7 @@ export function useCamera(options: CameraOptions = {}) {
     setIsActive(false);
     setFlashAvailable(false);
     setFlashOn(false);
-  }, [isActive]);
+  }, []);
 
   // Toggle flash on/off
   const toggleFlash = useCallback(async () => {
