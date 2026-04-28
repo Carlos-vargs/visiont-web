@@ -34,6 +34,7 @@ export function CameraView() {
     stopCamera,
     toggleFlash,
     captureFrame,
+    captureFrameData,
   } = useCamera({
     width: 1280,
     height: 720,
@@ -65,6 +66,7 @@ export function CameraView() {
   } = useCameraInteractionController({
     audio,
     captureFrame,
+    captureFrameData,
     sendImageWithPrompt,
     cancelActiveRequest,
   });

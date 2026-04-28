@@ -1,5 +1,17 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+const { sendDebugEventMock } = vi.hoisted(() => ({
+  sendDebugEventMock: vi.fn(),
+}));
+
+vi.mock("../lib/debugTelemetry", () => ({
+  sendDebugEvent: sendDebugEventMock,
+  serializeError: (error: any) => ({
+    name: error?.name,
+    message: error?.message,
+  }),
+}));
+
 import { useAudio } from "./useAudio";
 import { createMockStream } from "../../test/setup";
 
@@ -23,6 +35,10 @@ describe("useAudio", () => {
     getUserMediaMock().mockResolvedValue(createMockStream());
     speechSynthesisMock().speak.mockImplementation((utterance: any) => {
       setTimeout(() => utterance.onend?.(), 0);
+    });
+    Object.defineProperty(navigator, "onLine", {
+      configurable: true,
+      value: true,
     });
   });
 
@@ -161,6 +177,88 @@ describe("useAudio", () => {
     expect(result.current.speechStatus).toBe("idle");
   });
 
+  it("applies a gap between queued speech items", async () => {
+    vi.useFakeTimers();
+    const spokenAt: number[] = [];
+    speechSynthesisMock().speak.mockImplementation((utterance: any) => {
+      spokenAt.push(Date.now());
+      setTimeout(() => utterance.onend?.(), 0);
+    });
+
+    const { result } = renderHook(() => useAudio());
+
+    const firstPromise = result.current.speakText("Primero", { gapAfterMs: 180 });
+    const secondPromise = result.current.speakText("Segundo", { gapAfterMs: 180 });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.resolve();
+    });
+
+    expect(speechSynthesisMock().speak).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(179);
+    });
+
+    expect(speechSynthesisMock().speak).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.runAllTimersAsync();
+    });
+
+    await firstPromise;
+    await secondPromise;
+
+    expect(speechSynthesisMock().speak).toHaveBeenCalledTimes(2);
+    expect(spokenAt[1] - spokenAt[0]).toBeGreaterThanOrEqual(180);
+    expect(sendDebugEventMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "audio.speech_gap_applied",
+      }),
+    );
+  });
+
+  it("waits before speaking again after cancelSpeech", async () => {
+    vi.useFakeTimers();
+    speechSynthesisMock().speak.mockImplementation((utterance: any) => {
+      setTimeout(() => utterance.onend?.(), 0);
+    });
+
+    const { result } = renderHook(() => useAudio());
+
+    const initialPromise = result.current.speakText("Inicial", { gapAfterMs: 0 });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.resolve();
+    });
+    await initialPromise;
+
+    act(() => {
+      result.current.cancelSpeech();
+    });
+
+    const resumedPromise = result.current.speakText("Despues", { gapAfterMs: 0 });
+
+    expect(speechSynthesisMock().speak).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(249);
+    });
+
+    expect(speechSynthesisMock().speak).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.runAllTimersAsync();
+    });
+
+    await resumedPromise;
+
+    expect(speechSynthesisMock().speak).toHaveBeenCalledTimes(2);
+  });
+
   it("does not show playback error for intentional cancellation events", async () => {
     let utteranceRef: any;
     speechSynthesisMock().speak.mockImplementation((utterance: any) => {
@@ -258,5 +356,65 @@ describe("useAudio", () => {
 
     expect(result.current.transcript).toBe("");
     expect(result.current.recognitionStatus).toBe("idle");
+  });
+
+  it("reports enriched recognition error payload with breadcrumbs and context", () => {
+    const instances: any[] = [];
+    class MockRecognition {
+      continuous = false;
+      interimResults = false;
+      lang = "";
+      maxAlternatives = 1;
+      onstart: (() => void) | null = null;
+      onresult: ((event: any) => void) | null = null;
+      onerror: ((event: any) => void) | null = null;
+      onend: (() => void) | null = null;
+      start = vi.fn(() => this.onstart?.());
+      stop = vi.fn();
+
+      constructor() {
+        instances.push(this);
+      }
+    }
+
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "visible",
+    });
+    (window as any).SpeechRecognition = MockRecognition;
+
+    const { result } = renderHook(() => useAudio());
+
+    act(() => {
+      expect(result.current.startManualRecognition()).toBe(true);
+    });
+
+    const recognition = instances[0];
+    act(() => {
+      recognition.onerror?.({
+        error: "network",
+        message: "network disconnected",
+      });
+    });
+
+    expect(sendDebugEventMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "audio.recognition_error",
+        level: "error",
+        payload: expect.objectContaining({
+          error: "network",
+          errorMessage: "network disconnected",
+          mode: "manual",
+          navigatorOnline: true,
+          visibilityState: "visible",
+          breadcrumbs: expect.arrayContaining([
+            expect.objectContaining({ event: "startManualRecognition requested" }),
+            expect.objectContaining({ event: "recognition.start() called" }),
+            expect.objectContaining({ event: "recognition.onstart" }),
+            expect.objectContaining({ event: "recognition.onerror" }),
+          ]),
+        }),
+      }),
+    );
   });
 });

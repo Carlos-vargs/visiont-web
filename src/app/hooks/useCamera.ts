@@ -8,6 +8,13 @@ type CameraOptions = {
   frameRate?: number;
 };
 
+export type CapturedFrame = {
+  base64: string;
+  width: number;
+  height: number;
+  mimeType: "image/jpeg";
+};
+
 export function useCamera(options: CameraOptions = {}) {
   const {
     width = 640,
@@ -143,7 +150,7 @@ export function useCamera(options: CameraOptions = {}) {
     setIsActive(false);
     setFlashAvailable(false);
     setFlashOn(false);
-  }, []);
+  }, [isActive]);
 
   // Toggle flash on/off
   const toggleFlash = useCallback(async () => {
@@ -190,7 +197,7 @@ export function useCamera(options: CameraOptions = {}) {
     }
   }, [flashOn]);
 
-  const captureFrame = useCallback((): string | null => {
+  const captureFrameData = useCallback((): CapturedFrame | null => {
     if (!videoRef.current) {
       return null;
     }
@@ -219,8 +226,17 @@ export function useCamera(options: CameraOptions = {}) {
     // Remover el prefijo "data:image/jpeg;base64,"
     const base64 = dataUrl.split(",")[1];
 
-    return base64;
+    return {
+      base64,
+      width: canvas.width,
+      height: canvas.height,
+      mimeType: "image/jpeg",
+    };
   }, []);
+
+  const captureFrame = useCallback((): string | null => {
+    return captureFrameData()?.base64 || null;
+  }, [captureFrameData]);
 
   const captureFrameAtIntervals = useCallback(
     (
@@ -228,16 +244,16 @@ export function useCamera(options: CameraOptions = {}) {
       intervalMs: number = 2000
     ): (() => void) => {
       const intervalId = setInterval(() => {
-        const frame = captureFrame();
+        const frame = captureFrameData();
         if (frame) {
-          onFrame(frame);
+          onFrame(frame.base64);
         }
       }, intervalMs);
 
       // Retornar función de limpieza
       return () => clearInterval(intervalId);
     },
-    [captureFrame]
+    [captureFrameData]
   );
 
   const requestCameraPermission = useCallback(async () => {
@@ -276,7 +292,8 @@ export function useCamera(options: CameraOptions = {}) {
     stopCamera,
     toggleFlash,
     captureFrame,
+    captureFrameData,
     captureFrameAtIntervals,
     requestCameraPermission,
-  }), [isActive, error, permissionGranted, flashAvailable, flashOn, startCamera, stopCamera, toggleFlash, captureFrame, captureFrameAtIntervals, requestCameraPermission]);
+  }), [isActive, error, permissionGranted, flashAvailable, flashOn, startCamera, stopCamera, toggleFlash, captureFrame, captureFrameData, captureFrameAtIntervals, requestCameraPermission]);
 }

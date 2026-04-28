@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { useAudio } from "./useAudio";
 import { sendDebugEvent } from "../lib/debugTelemetry";
+import type { CapturedFrame } from "./useCamera";
 
 type AudioApi = ReturnType<typeof useAudio>;
 
@@ -42,9 +43,17 @@ export type CameraInteractionMode =
 type UseCameraInteractionControllerOptions = {
   audio: AudioApi;
   captureFrame: () => string | null;
+  captureFrameData: () => CapturedFrame | null;
   sendImageWithPrompt: (
     imageBase64: string,
     prompt: string,
+    imageMetadata?: {
+      width?: number;
+      height?: number;
+      mimeType?: "image/jpeg";
+      captureSource?: "analysis";
+      imageFilename?: string;
+    },
   ) => Promise<GeminiResponse>;
   cancelActiveRequest: () => void;
 };
@@ -69,6 +78,7 @@ const buildAnalysisPrompt = (transcript?: string) =>
 export function useCameraInteractionController({
   audio,
   captureFrame,
+  captureFrameData,
   sendImageWithPrompt,
   cancelActiveRequest,
 }: UseCameraInteractionControllerOptions) {
@@ -151,7 +161,7 @@ export function useCameraInteractionController({
       void audio.speakText("Analizando");
 
       try {
-        const frame = captureFrame();
+        const frame = captureFrameData();
         if (!frame || controller.signal.aborted || !isCurrentCycle(cycleId)) {
           if (!frame && isCurrentCycle(cycleId)) {
             setErrorMessage("No pude capturar una imagen para analizar.");
@@ -161,8 +171,15 @@ export function useCameraInteractionController({
         }
 
         const result = await sendImageWithPrompt(
-          frame,
+          frame.base64,
           buildAnalysisPrompt(transcript),
+          {
+            width: frame.width,
+            height: frame.height,
+            mimeType: frame.mimeType,
+            captureSource: "analysis",
+            imageFilename: `visiont-analysis-${Date.now()}.jpg`,
+          },
         );
 
         if (controller.signal.aborted || !isCurrentCycle(cycleId)) {
@@ -199,7 +216,7 @@ export function useCameraInteractionController({
         }
       }
     },
-    [audio, captureFrame, isCurrentCycle, sendImageWithPrompt, setModeState],
+    [audio, captureFrameData, isCurrentCycle, sendImageWithPrompt, setModeState],
   );
 
   const beginListening = useCallback(async () => {

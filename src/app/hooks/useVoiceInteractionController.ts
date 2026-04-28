@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { useAudio } from "./useAudio";
 import { sendDebugEvent } from "../lib/debugTelemetry";
+import type { CapturedFrame } from "./useCamera";
 
 type AudioApi = ReturnType<typeof useAudio>;
 
@@ -31,6 +32,7 @@ type UseVoiceInteractionControllerOptions = {
   cameraPreview: string | null;
   showCamera: boolean;
   captureFrame: () => string | null;
+  captureFrameData: () => CapturedFrame | null;
   startCamera: () => Promise<void>;
   stopCamera: () => void;
   setCameraPreview: (frame: string | null) => void;
@@ -39,6 +41,13 @@ type UseVoiceInteractionControllerOptions = {
   sendImageWithPrompt: (
     imageBase64: string,
     prompt: string,
+    imageMetadata?: {
+      width?: number;
+      height?: number;
+      mimeType?: "image/jpeg";
+      captureSource?: "analysis";
+      imageFilename?: string;
+    },
   ) => Promise<GeminiImageResponse>;
   cancelActiveRequest: () => void;
 };
@@ -74,6 +83,7 @@ export function useVoiceInteractionController({
   cameraPreview,
   showCamera,
   captureFrame,
+  captureFrameData,
   startCamera,
   stopCamera,
   setCameraPreview,
@@ -367,16 +377,32 @@ export function useVoiceInteractionController({
         let response: string;
 
         if (action === "¿Qué hay frente a mí?") {
-          const imageForPrompt = cameraPreview ?? captureFrame();
+          const capturedFrame = cameraPreview ? null : captureFrameData();
+          const imageForPrompt = cameraPreview ?? capturedFrame?.base64 ?? null;
           response = imageForPrompt
-            ? (await sendImageWithPrompt(imageForPrompt, GENERAL_SCENE_PROMPT))
-                .feedback
+            ? (
+                await sendImageWithPrompt(imageForPrompt, GENERAL_SCENE_PROMPT, {
+                  width: capturedFrame?.width,
+                  height: capturedFrame?.height,
+                  mimeType: capturedFrame?.mimeType,
+                  captureSource: "analysis",
+                  imageFilename: `visiont-analysis-${Date.now()}.jpg`,
+                })
+              ).feedback
             : IMAGE_REQUIRED_MESSAGE;
         } else if (action === "Lee el texto visible en la imagen") {
-          const imageForPrompt = cameraPreview ?? captureFrame();
+          const capturedFrame = cameraPreview ? null : captureFrameData();
+          const imageForPrompt = cameraPreview ?? capturedFrame?.base64 ?? null;
           response = imageForPrompt
-            ? (await sendImageWithPrompt(imageForPrompt, READ_TEXT_PROMPT))
-                .feedback
+            ? (
+                await sendImageWithPrompt(imageForPrompt, READ_TEXT_PROMPT, {
+                  width: capturedFrame?.width,
+                  height: capturedFrame?.height,
+                  mimeType: capturedFrame?.mimeType,
+                  captureSource: "analysis",
+                  imageFilename: `visiont-analysis-${Date.now()}.jpg`,
+                })
+              ).feedback
             : IMAGE_REQUIRED_MESSAGE;
         } else {
           response = await sendTextMessage(action);
@@ -399,6 +425,7 @@ export function useVoiceInteractionController({
       cameraPreview,
       cancelCurrentInteraction,
       captureFrame,
+      captureFrameData,
       isCurrentCycle,
       publishAssistantResponse,
       sendImageWithPrompt,

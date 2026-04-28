@@ -35,6 +35,7 @@ export function VoiceView() {
     startCamera,
     stopCamera,
     captureFrame,
+    captureFrameData,
   } = useCamera({
     width: 640,
     height: 480,
@@ -49,6 +50,7 @@ export function VoiceView() {
     cameraPreview,
     showCamera,
     captureFrame,
+    captureFrameData,
     startCamera,
     stopCamera,
     setCameraPreview,

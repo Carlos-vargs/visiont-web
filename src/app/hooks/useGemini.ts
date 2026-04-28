@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { GoogleGenAI } from "@google/genai";
 import { sendDebugEvent, serializeError } from "../lib/debugTelemetry";
+import type { CapturedFrame } from "./useCamera";
 
 type GeminiMessage = {
   role: "user" | "model";
@@ -20,6 +21,14 @@ type DetectionResult = {
 type GeminiResponse = {
   feedback: string;
   detections: DetectionResult[];
+};
+
+type GeminiImageMetadata = Pick<
+  CapturedFrame,
+  "width" | "height" | "mimeType"
+> & {
+  captureSource?: "analysis";
+  imageFilename?: string;
 };
 
 const isAbortError = (error: unknown) => {
@@ -242,7 +251,8 @@ Mantén las respuestas informativas pero breves (2-3 oraciones máximo para feed
   const sendImageWithPrompt = useCallback(
     async (
       imageBase64: string,
-      prompt: string = "Describe lo que ves en esta imagen. ¿Qué objetos hay? ¿Hay texto visible? ¿Hay personas u obstáculos?"
+      prompt: string = "Describe lo que ves en esta imagen. ¿Qué objetos hay? ¿Hay texto visible? ¿Hay personas u obstáculos?",
+      imageMetadata?: GeminiImageMetadata,
     ): Promise<GeminiResponse> => {
       if (!aiRef.current) {
         throw new Error("Cliente de Gemini no disponible");
@@ -251,6 +261,11 @@ Mantén las respuestas informativas pero breves (2-3 oraciones máximo para feed
       const { controller, requestId } = beginRequest();
 
       try {
+        const debugImageFilename =
+          imageMetadata?.imageFilename ||
+          `visiont-analysis-${Date.now()}.jpg`;
+        const debugImageMimeType = imageMetadata?.mimeType ?? "image/jpeg";
+
         sendDebugEvent({
           type: "gemini.image_request",
           source: "useGemini",
@@ -258,10 +273,15 @@ Mantén las respuestas informativas pero breves (2-3 oraciones máximo para feed
           payload: {
             prompt,
             imageBytesBase64Length: imageBase64.length,
+            captureSource: imageMetadata?.captureSource ?? "analysis",
+            width: imageMetadata?.width,
+            height: imageMetadata?.height,
+            imageMimeType: debugImageMimeType,
+            imageFilename: debugImageFilename,
           },
           imageBase64,
-          imageMimeType: "image/jpeg",
-          imageFilename: `visiont-analysis-${Date.now()}.jpg`,
+          imageMimeType: debugImageMimeType,
+          imageFilename: debugImageFilename,
         });
 
         const response = await aiRef.current.models.generateContent({

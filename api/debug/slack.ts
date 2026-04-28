@@ -96,6 +96,7 @@ const uploadFileToSlack = async ({
   channelId,
   threadTs,
   bytes,
+  mimeType,
   filename,
   title,
   initialComment,
@@ -105,6 +106,7 @@ const uploadFileToSlack = async ({
   channelId: string;
   threadTs: string;
   bytes: Buffer;
+  mimeType: string;
   filename: string;
   title: string;
   initialComment: string;
@@ -119,10 +121,10 @@ const uploadFileToSlack = async ({
   const uploadResponse = await fetch(uploadTicket.upload_url, {
     method: "POST",
     headers: {
-      "Content-Type": "application/octet-stream",
+      "Content-Type": mimeType,
       "Content-Length": String(bytes.byteLength),
     },
-    body: bytes,
+    body: new Uint8Array(bytes),
   });
 
   if (!uploadResponse.ok) {
@@ -242,6 +244,7 @@ export default async function handler(req: any, res: any) {
         channelId,
         threadTs,
         bytes: Buffer.from(payloadText, "utf8"),
+        mimeType: "application/json",
         filename: payloadFilename,
         title: payloadFilename,
         initialComment: `Payload completo para ${body.type || "visiont.debug"}`,
@@ -262,9 +265,10 @@ export default async function handler(req: any, res: any) {
         channelId,
         threadTs,
         bytes: imageBytes,
+        mimeType: body.imageMimeType || "image/jpeg",
         filename: imageFilename,
         title: imageFilename,
-        initialComment: `Imagen adjunta para ${body.type || "visiont.image"}`,
+        initialComment: "Frame enviado a Gemini para análisis",
         altText: body.message,
       });
     }

@@ -60,11 +60,19 @@ type SpeechQueueItem = {
   text: string;
   resolve: () => void;
   timeoutMs: number;
+  gapAfterMs: number;
   resolved?: boolean;
 };
 
 type SpeakTextOptions = {
   timeoutMs?: number;
+  gapAfterMs?: number;
+};
+
+type AudioBreadcrumb = {
+  at: string;
+  event: string;
+  details?: Record<string, unknown>;
 };
 
 const MICROPHONE_PERMISSION_CACHE_KEY = "visiont:microphone-permission";
@@ -75,10 +83,13 @@ const SPEECH_PLAYBACK_ERROR_MESSAGE =
 const DEFAULT_RECOGNITION_LANGUAGE = "es-ES";
 const DEFAULT_SILENCE_TIMEOUT = 4000;
 const DEFAULT_SPEECH_TIMEOUT_MS = 12000;
+const DEFAULT_SPEECH_GAP_MS = 180;
+const DEFAULT_POST_CANCEL_SPEECH_DELAY_MS = 250;
 const MIN_SPEECH_CHUNK_TIMEOUT_MS = 6000;
 const MAX_SPEECH_CHUNK_TIMEOUT_MS = 22000;
 const SPEECH_CHARS_PER_SECOND = 12;
 const MAX_SPEECH_CHUNK_LENGTH = 220;
+const MAX_AUDIO_BREADCRUMBS = 20;
 const DEFAULT_WAKE_WORDS = [
   "analiza",
   "quiero que",
@@ -222,6 +233,16 @@ const getSpeechChunkTimeoutMs = (text: string, overrideMs: number) => {
   );
 };
 
+const waitForDuration = async (ms: number) => {
+  if (ms <= 0) {
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+};
+
 const isIntentionalSpeechError = (event: any) => {
   const error = String(event?.error || "").toLowerCase();
   return (
@@ -360,6 +381,8 @@ export function useAudio(options: AudioOptions = {}) {
   const currentUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const currentSpeechItemRef = useRef<SpeechQueueItem | null>(null);
   const speechGenerationRef = useRef(0);
+  const nextSpeechStartNotBeforeRef = useRef(0);
+  const breadcrumbsRef = useRef<AudioBreadcrumb[]>([]);
 
   // SpeechRecognition state
   const recognitionRef = useRef<any>(null);
@@ -373,6 +396,96 @@ export function useAudio(options: AudioOptions = {}) {
   const isRecognitionPausedRef = useRef(false);
   const isRecognitionStartingRef = useRef(false);
   const recognitionGenerationRef = useRef(0);
+
+  const addBreadcrumb = useCallback(
+    (event: string, details?: Record<string, unknown>) => {
+      const next: AudioBreadcrumb = {
+        at: new Date().toISOString(),
+        event,
+        details,
+      };
+
+      const current = breadcrumbsRef.current;
+      const trimmed =
+        current.length >= MAX_AUDIO_BREADCRUMBS
+          ? current.slice(current.length - MAX_AUDIO_BREADCRUMBS + 1)
+          : current;
+
+      breadcrumbsRef.current = [...trimmed, next];
+    },
+    [],
+  );
+
+  const getRecognitionDebugContext = useCallback(
+    (extra: Record<string, unknown> = {}) => {
+      const recognition = recognitionRef.current;
+      return {
+        mode: recognitionModeRef.current,
+        lang: recognition?.lang ?? recognitionOptionsRef.current.language ?? DEFAULT_RECOGNITION_LANGUAGE,
+        continuous: recognition?.continuous ?? null,
+        interimResults: recognition?.interimResults ?? null,
+        maxAlternatives: recognition?.maxAlternatives ?? null,
+        permissionStatus,
+        permissionGranted,
+        hasKnownMicrophoneAccess:
+          hasKnownMicrophoneAccessRef.current || permissionStatus === "granted",
+        inputStatus,
+        recognitionStatus,
+        speechStatus,
+        isManualListening,
+        isBackgroundListening,
+        isRecognitionStarting: isRecognitionStartingRef.current,
+        isRecognitionPaused: isRecognitionPausedRef.current,
+        isListening,
+        isSpeaking,
+        isVoiceActive,
+        isVoiceProcessing,
+        navigatorOnline:
+          typeof navigator === "undefined" ? undefined : navigator.onLine,
+        navigatorLanguage:
+          typeof navigator === "undefined" ? undefined : navigator.language,
+        visibilityState:
+          typeof document === "undefined" ? undefined : document.visibilityState,
+        latestTranscript:
+          latestTranscriptRef.current.slice(0, 400) ||
+          transcriptBufferRef.current.slice(0, 400) ||
+          "",
+        breadcrumbs: breadcrumbsRef.current,
+        ...extra,
+      };
+    },
+    [
+      inputStatus,
+      isBackgroundListening,
+      isListening,
+      isManualListening,
+      isSpeaking,
+      isVoiceActive,
+      isVoiceProcessing,
+      permissionGranted,
+      permissionStatus,
+      recognitionStatus,
+      speechStatus,
+    ],
+  );
+
+  const emitRecognitionDebugEvent = useCallback(
+    (
+      type: string,
+      level: "info" | "warn" | "error",
+      message: string,
+      extra: Record<string, unknown> = {},
+    ) => {
+      sendDebugEvent({
+        type,
+        source: "useAudio",
+        level,
+        message,
+        payload: getRecognitionDebugContext(extra),
+      });
+    },
+    [getRecognitionDebugContext],
+  );
 
   useEffect(() => {
     let isMounted = true;
@@ -494,6 +607,7 @@ export function useAudio(options: AudioOptions = {}) {
 
   const startListening = useCallback(
     async (onAudioChunk?: (chunkBase64: string) => void): Promise<boolean> => {
+      addBreadcrumb("startListening requested");
       if (isListeningRef.current) {
         return true;
       }
@@ -530,6 +644,10 @@ export function useAudio(options: AudioOptions = {}) {
           }
 
           const openInputOnce = async () => {
+            addBreadcrumb("getUserMedia started", {
+              sendSampleRate,
+              enableEchoCancellation,
+            });
             const audioContext = new AudioContext({ sampleRate: sendSampleRate });
             audioContextRef.current = audioContext;
 
@@ -542,6 +660,7 @@ export function useAudio(options: AudioOptions = {}) {
               },
             });
             streamRef.current = stream;
+            addBreadcrumb("getUserMedia succeeded");
 
             const source = audioContext.createMediaStreamSource(stream);
 
@@ -617,6 +736,10 @@ export function useAudio(options: AudioOptions = {}) {
           });
           return true;
         } catch (err: any) {
+          addBreadcrumb("getUserMedia failed", {
+            name: err?.name,
+            message: err?.message,
+          });
           const hadKnownAccess =
             hasKnownMicrophoneAccessRef.current ||
             permissionStatus === "granted" ||
@@ -638,7 +761,12 @@ export function useAudio(options: AudioOptions = {}) {
             source: "useAudio",
             level: "error",
             message: msg,
-            payload: serializeError(err),
+            payload: {
+              ...serializeError(err),
+              breadcrumbs: breadcrumbsRef.current,
+              permissionStatus,
+              permissionGranted,
+            },
           });
           return false;
         } finally {
@@ -651,12 +779,14 @@ export function useAudio(options: AudioOptions = {}) {
       return startPromise;
     },
     [
+      addBreadcrumb,
       sendSampleRate,
       chunkSize,
       enableEchoCancellation,
       loadWorkletModule,
       cleanupInput,
       setAudioError,
+      permissionGranted,
       permissionStatus,
     ]
   );
@@ -774,11 +904,17 @@ export function useAudio(options: AudioOptions = {}) {
       recognition.interimResults = true;
       recognition.lang = language;
       recognition.maxAlternatives = 1;
+      addBreadcrumb("recognition instance created", {
+        mode,
+        language,
+      });
 
       recognition.onstart = () => {
         if (generation !== recognitionGenerationRef.current) {
           return;
         }
+
+        addBreadcrumb("recognition.onstart", { mode });
 
         isRecognitionStartingRef.current = false;
         recognitionModeRef.current = mode;
@@ -815,6 +951,12 @@ export function useAudio(options: AudioOptions = {}) {
         if (!full) {
           return;
         }
+
+        addBreadcrumb("recognition.onresult", {
+          mode,
+          final: Boolean(final),
+          transcriptPreview: full.trim().slice(0, 120),
+        });
 
         if (mode === "manual") {
           appendFinalTranscript(final);
@@ -856,6 +998,11 @@ export function useAudio(options: AudioOptions = {}) {
         }
 
         if (event.error === "not-allowed") {
+          addBreadcrumb("recognition.onerror", {
+            mode,
+            error: event.error,
+            message: event.message,
+          });
           isBackgroundListeningRef.current = false;
           isRecognitionPausedRef.current = false;
           isRecognitionStartingRef.current = false;
@@ -868,24 +1015,42 @@ export function useAudio(options: AudioOptions = {}) {
           setIsVoiceActive(false);
           setRecognitionStatus("error");
           setAudioError("Permiso de microfono denegado");
+          emitRecognitionDebugEvent(
+            "audio.recognition_error",
+            "error",
+            "SpeechRecognition error: not-allowed",
+            {
+              error: event.error,
+              errorMessage: event.message ?? null,
+            },
+          );
           return;
         }
 
         console.warn("[useAudio] SpeechRecognition error:", event.error);
         setRecognitionStatus("error");
-        sendDebugEvent({
-          type: "audio.recognition_error",
-          source: "useAudio",
-          level: "error",
-          message: `SpeechRecognition error: ${event.error}`,
-          payload: { error: event.error },
+        addBreadcrumb("recognition.onerror", {
+          mode,
+          error: event.error,
+          message: event.message,
         });
+        emitRecognitionDebugEvent(
+          "audio.recognition_error",
+          "error",
+          `SpeechRecognition error: ${event.error}`,
+          {
+            error: event.error,
+            errorMessage: event.message ?? null,
+          },
+        );
       };
 
       recognition.onend = () => {
         if (generation !== recognitionGenerationRef.current) {
           return;
         }
+
+        addBreadcrumb("recognition.onend", { mode });
 
         recognitionRef.current = null;
         isRecognitionStartingRef.current = false;
@@ -910,10 +1075,22 @@ export function useAudio(options: AudioOptions = {}) {
           recognitionRef.current = nextRecognition;
           isRecognitionStartingRef.current = true;
           try {
+            addBreadcrumb("recognition.start() called", { mode: "background" });
             nextRecognition.start();
-          } catch {
+          } catch (err: any) {
+            addBreadcrumb("recognition.start() failed", { mode: "background" });
             isRecognitionStartingRef.current = false;
             recognitionRef.current = null;
+            emitRecognitionDebugEvent(
+              "audio.background_recognition_error",
+              "error",
+              err?.message || "Error al reiniciar reconocimiento",
+              {
+                error: "recognition-start-failed",
+                errorMessage: err?.message ?? null,
+                exception: serializeError(err),
+              },
+            );
           }
         }
       };
@@ -921,9 +1098,11 @@ export function useAudio(options: AudioOptions = {}) {
       return recognition;
     },
     [
+      addBreadcrumb,
       appendFinalTranscript,
       clearSilenceTimer,
       containsWakeWord,
+      emitRecognitionDebugEvent,
       getRecognitionOptions,
       handleSilenceTimeout,
       resetTranscript,
@@ -935,6 +1114,7 @@ export function useAudio(options: AudioOptions = {}) {
   const startBackgroundRecognition = useCallback(
     (recognitionOptions: VoiceRecognitionOptions = {}) => {
       const SpeechRecognition = getSpeechRecognitionConstructor();
+      addBreadcrumb("startBackgroundRecognition requested");
       if (!SpeechRecognition) {
         setIsRecognitionSupported(false);
         setRecognitionStatus("unsupported");
@@ -963,6 +1143,7 @@ export function useAudio(options: AudioOptions = {}) {
       recognitionRef.current = recognition;
       isRecognitionStartingRef.current = true;
       try {
+        addBreadcrumb("recognition.start() called", { mode: "background" });
         recognition.start();
         sendDebugEvent({
           type: "audio.background_recognition_started",
@@ -977,21 +1158,29 @@ export function useAudio(options: AudioOptions = {}) {
         setIsBackgroundListening(false);
         setRecognitionStatus("error");
         setAudioError(`Error al iniciar reconocimiento: ${err.message}`);
-        sendDebugEvent({
-          type: "audio.background_recognition_error",
-          source: "useAudio",
-          level: "error",
-          message: err.message || "Error al iniciar reconocimiento",
-          payload: serializeError(err),
+        addBreadcrumb("recognition.start() failed", {
+          mode: "background",
+          message: err?.message,
         });
+        emitRecognitionDebugEvent(
+          "audio.background_recognition_error",
+          "error",
+          err.message || "Error al iniciar reconocimiento",
+          {
+            error: "recognition-start-failed",
+            errorMessage: err.message ?? null,
+            exception: serializeError(err),
+          },
+        );
       }
     },
-    [buildRecognition, setAudioError],
+    [addBreadcrumb, buildRecognition, emitRecognitionDebugEvent, setAudioError],
   );
 
   const startManualRecognition = useCallback(
     (recognitionOptions: Pick<VoiceRecognitionOptions, "language"> = {}) => {
       const SpeechRecognition = getSpeechRecognitionConstructor();
+      addBreadcrumb("startManualRecognition requested");
       if (!SpeechRecognition) {
         setIsRecognitionSupported(false);
         setRecognitionStatus("unsupported");
@@ -1031,6 +1220,7 @@ export function useAudio(options: AudioOptions = {}) {
       recognitionRef.current = recognition;
       isRecognitionStartingRef.current = true;
       try {
+        addBreadcrumb("recognition.start() called", { mode: "manual" });
         recognition.start();
         sendDebugEvent({
           type: "audio.manual_recognition_started",
@@ -1045,20 +1235,35 @@ export function useAudio(options: AudioOptions = {}) {
         setIsManualListening(false);
         setRecognitionStatus("error");
         setAudioError(`Error al iniciar reconocimiento: ${err.message}`);
-        sendDebugEvent({
-          type: "audio.manual_recognition_error",
-          source: "useAudio",
-          level: "error",
-          message: err.message || "Error al iniciar reconocimiento",
-          payload: serializeError(err),
+        addBreadcrumb("recognition.start() failed", {
+          mode: "manual",
+          message: err?.message,
         });
+        emitRecognitionDebugEvent(
+          "audio.manual_recognition_error",
+          "error",
+          err.message || "Error al iniciar reconocimiento",
+          {
+            error: "recognition-start-failed",
+            errorMessage: err.message ?? null,
+            exception: serializeError(err),
+          },
+        );
         return false;
       }
     },
-    [buildRecognition, clearSilenceTimer, resetRecognition, setAudioError],
+    [
+      addBreadcrumb,
+      buildRecognition,
+      clearSilenceTimer,
+      emitRecognitionDebugEvent,
+      resetRecognition,
+      setAudioError,
+    ],
   );
 
   const stopManualRecognition = useCallback(() => {
+    addBreadcrumb("stopManualRecognition");
     const captured =
       latestTranscriptRef.current.trim() || transcriptBufferRef.current.trim();
 
@@ -1086,9 +1291,10 @@ export function useAudio(options: AudioOptions = {}) {
     }
 
     return captured;
-  }, []);
+  }, [addBreadcrumb]);
 
   const stopBackgroundRecognition = useCallback(() => {
+    addBreadcrumb("stopBackgroundRecognition");
     isBackgroundListeningRef.current = false;
     isRecognitionPausedRef.current = false;
     isRecognitionStartingRef.current = false;
@@ -1109,9 +1315,10 @@ export function useAudio(options: AudioOptions = {}) {
     setIsVoiceActive(false);
     setIsVoiceProcessing(false);
     setRecognitionStatus("idle");
-  }, [clearSilenceTimer]);
+  }, [addBreadcrumb, clearSilenceTimer]);
 
   const pauseRecognition = useCallback(() => {
+    addBreadcrumb("pauseRecognition");
     isRecognitionPausedRef.current = true;
     setRecognitionStatus("paused");
     if (recognitionRef.current) {
@@ -1119,9 +1326,10 @@ export function useAudio(options: AudioOptions = {}) {
         recognitionRef.current.stop();
       } catch {}
     }
-  }, []);
+  }, [addBreadcrumb]);
 
   const resumeRecognition = useCallback(() => {
+    addBreadcrumb("resumeRecognition");
     if (!isBackgroundListeningRef.current) {
       return;
     }
@@ -1147,13 +1355,25 @@ export function useAudio(options: AudioOptions = {}) {
       isRecognitionStartingRef.current = true;
       setRecognitionStatus("starting");
       try {
+        addBreadcrumb("recognition.start() called", { mode: "background" });
         recognition.start();
-      } catch {
+      } catch (err: any) {
+        addBreadcrumb("recognition.start() failed", { mode: "background" });
         isRecognitionStartingRef.current = false;
         recognitionRef.current = null;
+        emitRecognitionDebugEvent(
+          "audio.background_recognition_error",
+          "error",
+          err?.message || "Error al reanudar reconocimiento",
+          {
+            error: "recognition-start-failed",
+            errorMessage: err?.message ?? null,
+            exception: serializeError(err),
+          },
+        );
       }
     }, 350);
-  }, [buildRecognition]);
+  }, [addBreadcrumb, buildRecognition, emitRecognitionDebugEvent]);
 
   // --- PCM playback ---
 
@@ -1245,8 +1465,29 @@ export function useAudio(options: AudioOptions = {}) {
       const item = speechQueueRef.current.shift()!;
       currentSpeechItemRef.current = item;
       const speechChunks = splitSpeechText(item.text);
+      const waitBeforeSpeechMs = Math.max(
+        0,
+        nextSpeechStartNotBeforeRef.current - Date.now(),
+      );
 
-      for (const speechChunk of speechChunks) {
+      if (waitBeforeSpeechMs > 0) {
+        addBreadcrumb("speech gap before start", {
+          gapMs: waitBeforeSpeechMs,
+          reason: "post-cancel",
+        });
+        sendDebugEvent({
+          type: "audio.speech_gap_applied",
+          source: "useAudio",
+          message: "Speech gap applied",
+          payload: {
+            gapMs: waitBeforeSpeechMs,
+            reason: "post-cancel",
+          },
+        });
+        await waitForDuration(waitBeforeSpeechMs);
+      }
+
+      for (const [index, speechChunk] of speechChunks.entries()) {
         if (generation !== speechGenerationRef.current) {
           break;
         }
@@ -1270,8 +1511,17 @@ export function useAudio(options: AudioOptions = {}) {
           utterance.rate = 1.0;
           utterance.pitch = 1.0;
 
-          utterance.onend = finishUtterance;
+          utterance.onend = () => {
+            addBreadcrumb("speech utterance end", {
+              text: speechChunk.slice(0, 120),
+            });
+            finishUtterance();
+          };
           utterance.onerror = (event) => {
+            addBreadcrumb("speech utterance error", {
+              error: (event as any)?.error,
+              text: speechChunk.slice(0, 120),
+            });
             if (
               generation !== speechGenerationRef.current ||
               isIntentionalSpeechError(event)
@@ -1292,6 +1542,9 @@ export function useAudio(options: AudioOptions = {}) {
           if (spanish) utterance.voice = spanish;
 
           currentUtteranceRef.current = utterance;
+          addBreadcrumb("speech utterance start", {
+            text: speechChunk.slice(0, 120),
+          });
           timeoutId = setTimeout(() => {
             if (generation === speechGenerationRef.current) {
               window.speechSynthesis.cancel();
@@ -1300,6 +1553,29 @@ export function useAudio(options: AudioOptions = {}) {
           }, getSpeechChunkTimeoutMs(speechChunk, item.timeoutMs));
           window.speechSynthesis.speak(utterance);
         });
+
+        const shouldApplyGap =
+          generation === speechGenerationRef.current &&
+          (index < speechChunks.length - 1 || speechQueueRef.current.length > 0);
+
+        if (shouldApplyGap && item.gapAfterMs > 0) {
+          const reason =
+            index < speechChunks.length - 1 ? "between-chunks" : "between-items";
+          addBreadcrumb("speech gap applied", {
+            gapMs: item.gapAfterMs,
+            reason,
+          });
+          sendDebugEvent({
+            type: "audio.speech_gap_applied",
+            source: "useAudio",
+            message: "Speech gap applied",
+            payload: {
+              gapMs: item.gapAfterMs,
+              reason,
+            },
+          });
+          await waitForDuration(item.gapAfterMs);
+        }
       }
 
       resolveSpeechItem(item);
@@ -1314,7 +1590,7 @@ export function useAudio(options: AudioOptions = {}) {
       setIsSpeaking(false);
       setSpeechStatus("idle");
     }
-  }, [setAudioError]);
+  }, [addBreadcrumb, setAudioError]);
 
   /**
    * Speak text sequentially.
@@ -1330,22 +1606,30 @@ export function useAudio(options: AudioOptions = {}) {
         return;
       }
       return new Promise<void>((resolve) => {
+        addBreadcrumb("speakText queued", {
+          text: text.slice(0, 120),
+          gapAfterMs: options.gapAfterMs ?? DEFAULT_SPEECH_GAP_MS,
+        });
         sendDebugEvent({
           type: "audio.speech_enqueued",
           source: "useAudio",
           message: "Speech synthesis queued",
-          payload: { text },
+          payload: {
+            text,
+            gapAfterMs: options.gapAfterMs ?? DEFAULT_SPEECH_GAP_MS,
+          },
         });
         speechQueueRef.current.push({
           text,
           resolve,
           timeoutMs: options.timeoutMs ?? DEFAULT_SPEECH_TIMEOUT_MS,
+          gapAfterMs: options.gapAfterMs ?? DEFAULT_SPEECH_GAP_MS,
         });
         setSpeechStatus(isSpeechProcessingRef.current ? "speaking" : "queued");
         processSpeechQueue();
       });
     },
-    [processSpeechQueue, setAudioError]
+    [addBreadcrumb, processSpeechQueue, setAudioError]
   );
 
   /**
@@ -1355,6 +1639,11 @@ export function useAudio(options: AudioOptions = {}) {
    */
   const cancelSpeech = useCallback(() => {
     speechGenerationRef.current += 1;
+    nextSpeechStartNotBeforeRef.current =
+      Date.now() + DEFAULT_POST_CANCEL_SPEECH_DELAY_MS;
+    addBreadcrumb("cancelSpeech", {
+      nextSpeechGapMs: DEFAULT_POST_CANCEL_SPEECH_DELAY_MS,
+    });
     sendDebugEvent({
       type: "audio.speech_cancelled",
       source: "useAudio",

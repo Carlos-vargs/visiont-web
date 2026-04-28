@@ -24,6 +24,12 @@ const createOptions = (overrides: Record<string, unknown> = {}) => ({
   cameraPreview: null,
   showCamera: false,
   captureFrame: vi.fn(() => "frame"),
+  captureFrameData: vi.fn(() => ({
+    base64: "frame",
+    width: 1280,
+    height: 720,
+    mimeType: "image/jpeg" as const,
+  })),
   startCamera: vi.fn().mockResolvedValue(undefined),
   stopCamera: vi.fn(),
   setCameraPreview: vi.fn(),

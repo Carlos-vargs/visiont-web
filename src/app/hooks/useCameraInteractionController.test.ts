@@ -37,6 +37,12 @@ const createAudio = () => ({
 
 const createController = (audio = createAudio()) => {
   const captureFrame = vi.fn(() => "image-base64");
+  const captureFrameData = vi.fn(() => ({
+    base64: "image-base64",
+    width: 1280,
+    height: 720,
+    mimeType: "image/jpeg" as const,
+  }));
   const sendImageWithPrompt = vi.fn().mockResolvedValue({
     feedback: "La mochila es azul",
     detections: [
@@ -57,12 +63,20 @@ const createController = (audio = createAudio()) => {
     useCameraInteractionController({
       audio: audio as any,
       captureFrame,
+      captureFrameData,
       sendImageWithPrompt,
       cancelActiveRequest,
     }),
   );
 
-  return { ...hook, audio, captureFrame, sendImageWithPrompt, cancelActiveRequest };
+  return {
+    ...hook,
+    audio,
+    captureFrame,
+    captureFrameData,
+    sendImageWithPrompt,
+    cancelActiveRequest,
+  };
 };
 
 describe("useCameraInteractionController", () => {
@@ -154,6 +168,12 @@ describe("useCameraInteractionController", () => {
     expect(sendImageWithPrompt).toHaveBeenCalledWith(
       "image-base64",
       expect.stringContaining('Solicitud del usuario: "de que color es la mochila"'),
+      expect.objectContaining({
+        width: 1280,
+        height: 720,
+        mimeType: "image/jpeg",
+        captureSource: "analysis",
+      }),
     );
     expect(result.current.activeBoxes).toHaveLength(1);
   });
