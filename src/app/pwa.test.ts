@@ -29,7 +29,7 @@ describe("PWA metadata", () => {
     expect(html).toContain('<html lang="es">');
     expect(html).toContain('rel="manifest" href="/manifest.webmanifest"');
     expect(html).toContain('name="theme-color"');
-    expect(html).toContain('name="apple-mobile-web-app-capable"');
+    expect(html).toContain('name="mobile-web-app-capable"');
     expect(html).toContain('rel="apple-touch-icon"');
   });
 });
