@@ -18,10 +18,6 @@ type VoiceRecognitionOptions = {
 
 type RecognitionMode = "background" | "manual";
 
-export type AudioManualVoiceInputMode =
-  | "speech-recognition"
-  | "audio-capture";
-
 export type AudioInputStatus =
   | "idle"
   | "starting"
@@ -73,15 +69,6 @@ type SpeakTextOptions = {
   gapAfterMs?: number;
 };
 
-export type CapturedAudioPayload = {
-  base64: string;
-  mimeType: "audio/wav";
-  sampleRate: number;
-  durationMs: number;
-  bytes: number;
-  chunkCount: number;
-};
-
 type AudioBreadcrumb = {
   at: string;
   event: string;
@@ -122,74 +109,6 @@ const int16ToBase64 = (int16Array: Int16Array): string => {
     binary += String.fromCharCode(...chunk);
   }
   return btoa(binary);
-};
-
-const bytesToBase64 = (bytes: Uint8Array): string => {
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const chunk = bytes.subarray(i, i + chunkSize);
-    binary += String.fromCharCode(...chunk);
-  }
-  return btoa(binary);
-};
-
-const base64ToInt16Array = (value: string): Int16Array => {
-  const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-
-  return new Int16Array(bytes.buffer.slice(0));
-};
-
-const concatInt16Chunks = (chunks: Int16Array[]) => {
-  const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  const merged = new Int16Array(totalLength);
-  let offset = 0;
-
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.length;
-  }
-
-  return merged;
-};
-
-const encodeWavFromPcm16 = (samples: Int16Array, sampleRate: number) => {
-  const bytesPerSample = 2;
-  const dataSize = samples.length * bytesPerSample;
-  const buffer = new ArrayBuffer(44 + dataSize);
-  const view = new DataView(buffer);
-
-  const writeAscii = (offset: number, value: string) => {
-    for (let i = 0; i < value.length; i += 1) {
-      view.setUint8(offset + i, value.charCodeAt(i));
-    }
-  };
-
-  writeAscii(0, "RIFF");
-  view.setUint32(4, 36 + dataSize, true);
-  writeAscii(8, "WAVE");
-  writeAscii(12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * bytesPerSample, true);
-  view.setUint16(32, bytesPerSample, true);
-  view.setUint16(34, 16, true);
-  writeAscii(36, "data");
-  view.setUint32(40, dataSize, true);
-
-  let offset = 44;
-  for (let i = 0; i < samples.length; i += 1) {
-    view.setInt16(offset, samples[i], true);
-    offset += bytesPerSample;
-  }
-
-  return new Uint8Array(buffer);
 };
 
 const getInlineWorkletCode = (chunkSize: number) => `
@@ -498,8 +417,6 @@ export function useAudio(options: AudioOptions = {}) {
     useState<AudioRecognitionStatus>("idle");
   const [speechStatus, setSpeechStatus] = useState<AudioSpeechStatus>("idle");
   const [lastAudioError, setLastAudioError] = useState<string | null>(null);
-  const manualVoiceInputMode: AudioManualVoiceInputMode =
-    isLikelyMobileBrowser() ? "audio-capture" : "speech-recognition";
 
   const permissionStatusStateRef = useRef(permissionStatus);
   const permissionGrantedStateRef = useRef(permissionGranted);
@@ -559,10 +476,6 @@ export function useAudio(options: AudioOptions = {}) {
   const inputStartedAtRef = useRef<number | null>(null);
   const lastSpeechStartedAtRef = useRef<number | null>(null);
   const lastSpeechEndedAtRef = useRef<number | null>(null);
-  const manualCaptureChunksRef = useRef<Int16Array[]>([]);
-  const manualCaptureStartedAtRef = useRef<number | null>(null);
-  const manualCaptureChunkCountRef = useRef(0);
-  const isManualAudioCaptureActiveRef = useRef(false);
 
   permissionStatusStateRef.current = permissionStatus;
   permissionGrantedStateRef.current = permissionGranted;
@@ -595,20 +508,11 @@ export function useAudio(options: AudioOptions = {}) {
     [],
   );
 
-  const resetManualAudioCaptureState = useCallback(() => {
-    manualCaptureChunksRef.current = [];
-    manualCaptureStartedAtRef.current = null;
-    manualCaptureChunkCountRef.current = 0;
-    isManualAudioCaptureActiveRef.current = false;
-  }, []);
-
   const shouldSkipParallelInputForManualRecognition = useCallback(() => {
-    const currentRecognitionMode: RecognitionMode | null =
-      recognitionModeRef.current;
     const isManualRecognitionActive =
-      currentRecognitionMode === "manual" ||
+      recognitionModeRef.current === "manual" ||
       (isRecognitionStartingRef.current &&
-        currentRecognitionMode === "manual");
+        recognitionModeRef.current === "manual");
 
     return isManualRecognitionActive && isLikelyMobileBrowser();
   }, []);
@@ -652,7 +556,6 @@ export function useAudio(options: AudioOptions = {}) {
       }
 
       return {
-        manualVoiceInputMode,
         mode: recognitionModeRef.current,
         lang: recognition?.lang ?? recognitionOptionsRef.current.language ?? DEFAULT_RECOGNITION_LANGUAGE,
         continuous: recognition?.continuous ?? null,
@@ -871,13 +774,12 @@ export function useAudio(options: AudioOptions = {}) {
     isStartingRef.current = false;
     inputStartPromiseRef.current = null;
     inputStartedAtRef.current = null;
-    resetManualAudioCaptureState();
     isListeningStateRef.current = false;
     inputStatusStateRef.current = "idle";
     setIsListening(false);
     setAudioLevel(0);
     setInputStatus("idle");
-  }, [cleanupWorkletUrl, resetManualAudioCaptureState]);
+  }, [cleanupWorkletUrl]);
 
   const startListening = useCallback(
     async (onAudioChunk?: (chunkBase64: string) => void): Promise<boolean> => {
@@ -1107,188 +1009,6 @@ export function useAudio(options: AudioOptions = {}) {
     }
     cleanupInput();
   }, [cleanupInput]);
-
-  const startManualAudioCapture = useCallback(async (): Promise<boolean> => {
-    addBreadcrumb("startManualAudioCapture requested", {
-      mode: manualVoiceInputMode,
-    });
-
-    if (isManualAudioCaptureActiveRef.current) {
-      return true;
-    }
-
-    resetManualAudioCaptureState();
-    setAudioError(null);
-
-    const started = await startListening((chunkBase64) => {
-      if (!isManualAudioCaptureActiveRef.current) {
-        return;
-      }
-
-      const chunk = base64ToInt16Array(chunkBase64);
-      manualCaptureChunksRef.current.push(chunk);
-      manualCaptureChunkCountRef.current += 1;
-    });
-
-    if (!started) {
-      sendDebugEvent({
-        type: "audio.manual_capture_error",
-        source: "useAudio",
-        level: "error",
-        message:
-          lastAudioError || "No pude iniciar la captura manual de audio.",
-        payload: getRecognitionDebugContext({
-          manualVoiceInputMode,
-          reason: "manual-capture-start-failed",
-        }),
-      });
-      return false;
-    }
-
-    isManualAudioCaptureActiveRef.current = true;
-    manualCaptureStartedAtRef.current = Date.now();
-    isManualListeningStateRef.current = true;
-    setIsManualListening(true);
-    sendDebugEvent({
-      type: "audio.manual_capture_started",
-      source: "useAudio",
-      message: "Manual audio capture started",
-      payload: {
-        sampleRate: sendSampleRate,
-        chunkSize,
-        manualVoiceInputMode,
-      },
-    });
-
-    return true;
-  }, [
-    addBreadcrumb,
-    chunkSize,
-    getRecognitionDebugContext,
-    lastAudioError,
-    manualVoiceInputMode,
-    resetManualAudioCaptureState,
-    sendSampleRate,
-    setAudioError,
-    startListening,
-  ]);
-
-  const stopManualAudioCapture = useCallback(
-    async (): Promise<CapturedAudioPayload | null> => {
-      addBreadcrumb("stopManualAudioCapture", {
-        mode: manualVoiceInputMode,
-      });
-
-      const startedAt = manualCaptureStartedAtRef.current;
-      const chunkCount = manualCaptureChunkCountRef.current;
-      const recordedChunks = [...manualCaptureChunksRef.current];
-      const wasActive = isManualAudioCaptureActiveRef.current;
-
-      isManualAudioCaptureActiveRef.current = false;
-      isManualListeningStateRef.current = false;
-      setIsManualListening(false);
-
-      if (isListeningRef.current) {
-        stopListening();
-      } else {
-        resetManualAudioCaptureState();
-      }
-
-      if (!wasActive) {
-        return null;
-      }
-
-      const pcm = concatInt16Chunks(recordedChunks);
-      const durationMs = startedAt ? Date.now() - startedAt : 0;
-      if (pcm.length === 0) {
-        sendDebugEvent({
-          type: "audio.manual_capture_stopped",
-          source: "useAudio",
-          message: "Manual audio capture stopped with no samples",
-          payload: {
-            durationMs,
-            sampleRate: sendSampleRate,
-            bytes: 0,
-            chunkCount,
-            manualVoiceInputMode,
-          },
-        });
-        return null;
-      }
-
-      const wavBytes = encodeWavFromPcm16(pcm, sendSampleRate);
-      const payload: CapturedAudioPayload = {
-        base64: bytesToBase64(wavBytes),
-        mimeType: "audio/wav",
-        sampleRate: sendSampleRate,
-        durationMs,
-        bytes: wavBytes.byteLength,
-        chunkCount,
-      };
-
-      sendDebugEvent({
-        type: "audio.manual_capture_stopped",
-        source: "useAudio",
-        message: "Manual audio capture stopped",
-        payload: {
-          durationMs,
-          sampleRate: sendSampleRate,
-          bytes: payload.bytes,
-          chunkCount,
-          manualVoiceInputMode,
-        },
-      });
-
-      return payload;
-    },
-    [
-      addBreadcrumb,
-      manualVoiceInputMode,
-      resetManualAudioCaptureState,
-      sendSampleRate,
-      stopListening,
-    ],
-  );
-
-  const cancelManualAudioCapture = useCallback(() => {
-    const wasActive = isManualAudioCaptureActiveRef.current;
-    const chunkCount = manualCaptureChunkCountRef.current;
-    addBreadcrumb("cancelManualAudioCapture", {
-      mode: manualVoiceInputMode,
-      wasActive,
-    });
-
-    isManualAudioCaptureActiveRef.current = false;
-    isManualListeningStateRef.current = false;
-    setIsManualListening(false);
-
-    if (isListeningRef.current) {
-      stopListening();
-    } else {
-      resetManualAudioCaptureState();
-    }
-
-    if (!wasActive) {
-      return;
-    }
-
-    sendDebugEvent({
-      type: "audio.manual_capture_cancelled",
-      source: "useAudio",
-      message: "Manual audio capture cancelled",
-      payload: {
-        sampleRate: sendSampleRate,
-        chunkCount,
-        manualVoiceInputMode,
-      },
-    });
-  }, [
-    addBreadcrumb,
-    manualVoiceInputMode,
-    resetManualAudioCaptureState,
-    sendSampleRate,
-    stopListening,
-  ]);
 
   // --- Speech recognition ---
 
@@ -2314,7 +2034,6 @@ export function useAudio(options: AudioOptions = {}) {
     isListening,
     isSpeaking,
     error,
-    manualVoiceInputMode,
     permissionGranted,
     permissionStatus,
     hasKnownMicrophoneAccess:
@@ -2332,9 +2051,6 @@ export function useAudio(options: AudioOptions = {}) {
     isVoiceProcessing,
     startListening,
     stopListening,
-    startManualAudioCapture,
-    stopManualAudioCapture,
-    cancelManualAudioCapture,
     startManualRecognition,
     stopManualRecognition,
     startBackgroundRecognition,

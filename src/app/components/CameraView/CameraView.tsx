@@ -50,7 +50,6 @@ export function CameraView() {
   const {
     error: geminiError,
     sendImageWithPrompt,
-    transcribeAudio,
     cancelActiveRequest,
   } = useGemini();
 
@@ -69,7 +68,6 @@ export function CameraView() {
     captureFrame,
     captureFrameData,
     sendImageWithPrompt,
-    transcribeAudio,
     cancelActiveRequest,
   });
 

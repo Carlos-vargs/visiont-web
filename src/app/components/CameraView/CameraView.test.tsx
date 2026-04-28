@@ -29,7 +29,6 @@ const mockAudioState = {
 const mockGeminiState = {
   error: null as string | null,
   sendImageWithPrompt: vi.fn(),
-  transcribeAudio: vi.fn(),
   cancelActiveRequest: vi.fn(),
 };
 

@@ -6,9 +6,6 @@ const createAudio = () => ({
   isListening: false,
   isSpeaking: false,
   error: null,
-  manualVoiceInputMode: "speech-recognition" as
-    | "speech-recognition"
-    | "audio-capture",
   permissionGranted: false,
   permissionStatus: "unknown",
   hasKnownMicrophoneAccess: false,
@@ -25,16 +22,6 @@ const createAudio = () => ({
   isVoiceProcessing: false,
   startListening: vi.fn().mockResolvedValue(true),
   stopListening: vi.fn(),
-  startManualAudioCapture: vi.fn().mockResolvedValue(true),
-  stopManualAudioCapture: vi.fn().mockResolvedValue({
-    base64: "audio-base64",
-    mimeType: "audio/wav" as const,
-    sampleRate: 16000,
-    durationMs: 900,
-    bytes: 4096,
-    chunkCount: 3,
-  }),
-  cancelManualAudioCapture: vi.fn(),
   startManualRecognition: vi.fn().mockReturnValue(true),
   stopManualRecognition: vi.fn().mockReturnValue(""),
   startBackgroundRecognition: vi.fn(),
@@ -70,7 +57,6 @@ const createController = (audio = createAudio()) => {
       },
     ],
   });
-  const transcribeAudio = vi.fn().mockResolvedValue("de que color es la mochila");
   const cancelActiveRequest = vi.fn();
 
   const hook = renderHook(() =>
@@ -79,7 +65,6 @@ const createController = (audio = createAudio()) => {
       captureFrame,
       captureFrameData,
       sendImageWithPrompt,
-      transcribeAudio,
       cancelActiveRequest,
     }),
   );
@@ -90,7 +75,6 @@ const createController = (audio = createAudio()) => {
     captureFrame,
     captureFrameData,
     sendImageWithPrompt,
-    transcribeAudio,
     cancelActiveRequest,
   };
 };
@@ -250,60 +234,5 @@ describe("useCameraInteractionController", () => {
     expect(result.current.mode).toBe("listening");
     expect(result.current.hasRealAudioLevel).toBe(false);
     expect(result.current.audioLevel).toBe(0);
-  });
-
-  it("uses manual audio capture and transcription in mobile camera flow", async () => {
-    const audio = createAudio();
-    audio.manualVoiceInputMode = "audio-capture";
-    audio.inputStatus = "active";
-    const { result, transcribeAudio, sendImageWithPrompt } =
-      createController(audio);
-
-    await act(async () => {
-      await result.current.handleMicPress();
-    });
-
-    expect(audio.startManualAudioCapture).toHaveBeenCalledTimes(1);
-    expect(audio.startManualRecognition).not.toHaveBeenCalled();
-
-    await act(async () => {
-      await result.current.handleMicPress();
-    });
-
-    expect(audio.stopManualAudioCapture).toHaveBeenCalledTimes(1);
-    expect(transcribeAudio).toHaveBeenCalledWith("audio-base64", "audio/wav");
-    expect(sendImageWithPrompt).toHaveBeenCalledWith(
-      "image-base64",
-      expect.stringContaining('Solicitud del usuario: "de que color es la mochila"'),
-      expect.objectContaining({
-        captureSource: "analysis",
-      }),
-    );
-  });
-
-  it("falls back to image-only analysis when mobile transcription fails", async () => {
-    const audio = createAudio();
-    audio.manualVoiceInputMode = "audio-capture";
-    audio.inputStatus = "active";
-    const { result, transcribeAudio, sendImageWithPrompt } =
-      createController(audio);
-    transcribeAudio.mockRejectedValue(new Error("transcription failed"));
-
-    await act(async () => {
-      await result.current.handleMicPress();
-    });
-
-    await act(async () => {
-      await result.current.handleMicPress();
-    });
-
-    expect(sendImageWithPrompt).toHaveBeenCalledWith(
-      "image-base64",
-      expect.not.stringContaining("Solicitud del usuario:"),
-      expect.objectContaining({
-        captureSource: "analysis",
-      }),
-    );
-    expect(result.current.errorMessage).toBeNull();
   });
 });
