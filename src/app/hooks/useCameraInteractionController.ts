@@ -251,6 +251,8 @@ export function useCameraInteractionController({
         setStatusMessage("Escuchando sin medidor de volumen");
       } else if (!audioStarted) {
         setStatusMessage("Escuchando sin medidor de volumen");
+      } else if (audio.inputStatus !== "active") {
+        setStatusMessage("Escuchando sin medidor de volumen");
       } else {
         setStatusMessage("Escuchando... Toca para analizar");
       }

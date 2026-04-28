@@ -85,6 +85,7 @@ const DEFAULT_SILENCE_TIMEOUT = 4000;
 const DEFAULT_SPEECH_TIMEOUT_MS = 12000;
 const DEFAULT_SPEECH_GAP_MS = 180;
 const DEFAULT_POST_CANCEL_SPEECH_DELAY_MS = 250;
+const DEFAULT_POST_SPEECH_RECOGNITION_DELAY_MS = 350;
 const MIN_SPEECH_CHUNK_TIMEOUT_MS = 6000;
 const MAX_SPEECH_CHUNK_TIMEOUT_MS = 22000;
 const SPEECH_CHARS_PER_SECOND = 12;
@@ -526,6 +527,9 @@ export function useAudio(options: AudioOptions = {}) {
       const activeInputTrackStates = getTrackDebugInfo(streamRef.current);
       const browserIsMobile = isLikelyMobileBrowser();
       const diagnosticHints: string[] = [];
+      const timeSinceLastSpeechEndMs = lastSpeechEndedAtRef.current
+        ? now - lastSpeechEndedAtRef.current
+        : null;
 
       if (extra.error === "network") {
         if (browserIsMobile) {
@@ -542,6 +546,12 @@ export function useAudio(options: AudioOptions = {}) {
           navigator.onLine === false
         ) {
           diagnosticHints.push("browser-reported-offline");
+        }
+        if (
+          typeof timeSinceLastSpeechEndMs === "number" &&
+          timeSinceLastSpeechEndMs < DEFAULT_POST_SPEECH_RECOGNITION_DELAY_MS
+        ) {
+          diagnosticHints.push("speechrecognition-started-too-soon-after-tts");
         }
       }
 
@@ -619,9 +629,7 @@ export function useAudio(options: AudioOptions = {}) {
         lastSpeechEndedAt: lastSpeechEndedAtRef.current
           ? new Date(lastSpeechEndedAtRef.current).toISOString()
           : null,
-        timeSinceLastSpeechEndMs: lastSpeechEndedAtRef.current
-          ? now - lastSpeechEndedAtRef.current
-          : null,
+        timeSinceLastSpeechEndMs,
         latestTranscript:
           latestTranscriptRef.current.slice(0, 400) ||
           transcriptBufferRef.current.slice(0, 400) ||
@@ -801,7 +809,7 @@ export function useAudio(options: AudioOptions = {}) {
             reason: "mobile-manual-recognition-conflict",
           }),
         });
-        return false;
+        return true;
       }
 
       const startPromise = (async () => {
@@ -1439,41 +1447,83 @@ export function useAudio(options: AudioOptions = {}) {
 
       recognitionRef.current = recognition;
       isRecognitionStartingRef.current = true;
-      try {
-        addBreadcrumb("recognition.start() called", { mode: "manual" });
-        recognition.start();
-        sendDebugEvent({
-          type: "audio.manual_recognition_started",
-          source: "useAudio",
-          message: "Manual speech recognition started",
-        });
-        return true;
-      } catch (err: any) {
-        isRecognitionStartingRef.current = false;
-        recognitionRequestedAtRef.current = null;
-        recognitionModeRef.current = null;
-        recognitionRef.current = null;
-        isManualListeningStateRef.current = false;
-        recognitionStatusStateRef.current = "error";
-        setIsManualListening(false);
-        setRecognitionStatus("error");
-        setAudioError(`Error al iniciar reconocimiento: ${err.message}`);
-        addBreadcrumb("recognition.start() failed", {
+      const generation = recognitionGenerationRef.current;
+      const elapsedSinceSpeechEnd = lastSpeechEndedAtRef.current
+        ? Date.now() - lastSpeechEndedAtRef.current
+        : Number.POSITIVE_INFINITY;
+      const manualRecognitionDelayMs =
+        isLikelyMobileBrowser() &&
+        elapsedSinceSpeechEnd < DEFAULT_POST_SPEECH_RECOGNITION_DELAY_MS
+          ? DEFAULT_POST_SPEECH_RECOGNITION_DELAY_MS - elapsedSinceSpeechEnd
+          : 0;
+
+      const startRecognition = () => {
+        if (
+          generation !== recognitionGenerationRef.current ||
+          recognitionRef.current !== recognition ||
+          recognitionModeRef.current !== "manual"
+        ) {
+          return;
+        }
+
+        try {
+          addBreadcrumb("recognition.start() called", { mode: "manual" });
+          recognition.start();
+          sendDebugEvent({
+            type: "audio.manual_recognition_started",
+            source: "useAudio",
+            message: "Manual speech recognition started",
+          });
+        } catch (err: any) {
+          isRecognitionStartingRef.current = false;
+          recognitionRequestedAtRef.current = null;
+          recognitionModeRef.current = null;
+          recognitionRef.current = null;
+          isManualListeningStateRef.current = false;
+          recognitionStatusStateRef.current = "error";
+          setIsManualListening(false);
+          setRecognitionStatus("error");
+          setAudioError(`Error al iniciar reconocimiento: ${err.message}`);
+          addBreadcrumb("recognition.start() failed", {
+            mode: "manual",
+            message: err?.message,
+          });
+          emitRecognitionDebugEvent(
+            "audio.manual_recognition_error",
+            "error",
+            err.message || "Error al iniciar reconocimiento",
+            {
+              error: "recognition-start-failed",
+              errorMessage: err.message ?? null,
+              exception: serializeError(err),
+            },
+          );
+        }
+      };
+
+      if (manualRecognitionDelayMs > 0) {
+        addBreadcrumb("recognition.start() delayed", {
           mode: "manual",
-          message: err?.message,
+          delayMs: manualRecognitionDelayMs,
+          reason: "post-speech-mobile-stability",
         });
-        emitRecognitionDebugEvent(
-          "audio.manual_recognition_error",
-          "error",
-          err.message || "Error al iniciar reconocimiento",
-          {
-            error: "recognition-start-failed",
-            errorMessage: err.message ?? null,
-            exception: serializeError(err),
+        sendDebugEvent({
+          type: "audio.recognition_start_delayed",
+          source: "useAudio",
+          message:
+            "Delayed manual SpeechRecognition start after TTS on mobile",
+          payload: {
+            mode: "manual",
+            delayMs: manualRecognitionDelayMs,
+            reason: "post-speech-mobile-stability",
           },
-        );
-        return false;
+        });
+        setTimeout(startRecognition, manualRecognitionDelayMs);
+      } else {
+        startRecognition();
       }
+
+      return true;
     },
     [
       addBreadcrumb,
