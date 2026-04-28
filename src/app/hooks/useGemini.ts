@@ -35,6 +35,22 @@ const isAbortError = (error: unknown) => {
   return err?.name === "AbortError" || /abort/i.test(err?.message || "");
 };
 
+const normalizeTranscriptionText = (value: string) => {
+  const withoutCodeFence = value
+    .replace(/^```(?:text|txt|json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+
+  if (
+    (withoutCodeFence.startsWith('"') && withoutCodeFence.endsWith('"')) ||
+    (withoutCodeFence.startsWith("'") && withoutCodeFence.endsWith("'"))
+  ) {
+    return withoutCodeFence.slice(1, -1).trim();
+  }
+
+  return withoutCodeFence;
+};
+
 export function useGemini() {
   const [isConnected, setIsConnected] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -486,6 +502,91 @@ Proporciona coordenadas aproximadas (x, y como porcentaje de la imagen desde la 
     [beginRequest, finishRequest, isCurrentRequest]
   );
 
+  const transcribeAudio = useCallback(
+    async (
+      audioBase64: string,
+      mimeType: string = "audio/wav",
+    ): Promise<string> => {
+      if (!aiRef.current) {
+        throw new Error("Cliente de Gemini no disponible");
+      }
+
+      const { controller, requestId } = beginRequest();
+
+      try {
+        sendDebugEvent({
+          type: "gemini.audio_transcription_request",
+          source: "useGemini",
+          message: "Audio transcription sent to Gemini",
+          payload: {
+            hasAudio: Boolean(audioBase64),
+            audioBytesBase64Length: audioBase64?.length || 0,
+            mimeType,
+          },
+        });
+
+        const response = await aiRef.current.models.generateContent({
+          model: "gemini-2.5-flash",
+          config: { abortSignal: controller.signal },
+          contents: [
+            {
+              parts: [
+                {
+                  inlineData: {
+                    mimeType,
+                    data: audioBase64,
+                  },
+                },
+                {
+                  text:
+                    "Transcribe exactamente el audio hablado en español. Devuelve solo la transcripción literal, sin comillas, sin explicaciones y sin responder la instrucción.",
+                },
+              ],
+            },
+          ],
+        });
+
+        if (!isCurrentRequest(requestId, controller)) {
+          throw new DOMException("Request superseded", "AbortError");
+        }
+
+        const transcription = normalizeTranscriptionText(
+          response.text || "",
+        );
+        sendDebugEvent({
+          type: "gemini.audio_transcription_response",
+          source: "useGemini",
+          message: "Audio transcription received from Gemini",
+          payload: {
+            text: transcription,
+          },
+        });
+
+        return transcription;
+      } catch (err: any) {
+        if (controller.signal.aborted || isAbortError(err)) {
+          throw err;
+        }
+
+        const errorMsg = err.message || "Error al transcribir audio";
+        if (isCurrentRequest(requestId, controller)) {
+          setError(errorMsg);
+        }
+        sendDebugEvent({
+          type: "gemini.audio_transcription_error",
+          source: "useGemini",
+          level: "error",
+          message: errorMsg,
+          payload: serializeError(err),
+        });
+        throw err;
+      } finally {
+        finishRequest(requestId, controller);
+      }
+    },
+    [beginRequest, finishRequest, isCurrentRequest],
+  );
+
   const disconnect = useCallback(() => {
     cancelActiveRequest();
     liveSessionRef.current = null;
@@ -512,6 +613,7 @@ Proporciona coordenadas aproximadas (x, y como porcentaje de la imagen desde la 
     sendImageWithPrompt,
     sendRealtimeAudio,
     sendAudioChunk,
+    transcribeAudio,
     cancelActiveRequest,
     disconnect,
     clearHistory,

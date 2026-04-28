@@ -25,6 +25,26 @@ const speechSynthesisMock = () =>
     getVoices: ReturnType<typeof vi.fn>;
   };
 
+const setNavigatorUserAgent = (userAgent: string, maxTouchPoints = 0) => {
+  Object.defineProperty(navigator, "userAgent", {
+    configurable: true,
+    value: userAgent,
+  });
+  Object.defineProperty(navigator, "maxTouchPoints", {
+    configurable: true,
+    value: maxTouchPoints,
+  });
+};
+
+const decodeBase64ToBytes = (value: string) => {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+};
+
 describe("useAudio", () => {
   beforeEach(() => {
     vi.useRealTimers();
@@ -40,6 +60,7 @@ describe("useAudio", () => {
       configurable: true,
       value: true,
     });
+    setNavigatorUserAgent("Mozilla/5.0 (X11; Linux x86_64)", 0);
   });
 
   it("deduplicates rapid startListening calls", async () => {
@@ -123,6 +144,129 @@ describe("useAudio", () => {
     expect(started).toBe(true);
     expect(getUserMediaMock()).toHaveBeenCalledTimes(2);
     expect(result.current.inputStatus).toBe("active");
+  });
+
+  it("starts manual audio capture on mobile and returns a wav payload", async () => {
+    setNavigatorUserAgent(
+      "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/147.0.0.0 Mobile Safari/537.36",
+      5,
+    );
+
+    let workletNodeInstance: {
+      port: { onmessage: ((event: MessageEvent) => void) | null };
+      connect: ReturnType<typeof vi.fn>;
+      disconnect: ReturnType<typeof vi.fn>;
+    } | null = null;
+
+    class TrackingAudioWorkletNode {
+      port = {
+        postMessage: vi.fn(),
+        onmessage: null as ((event: MessageEvent) => void) | null,
+      };
+
+      connect = vi.fn();
+      disconnect = vi.fn();
+
+      constructor() {
+        workletNodeInstance = this;
+      }
+    }
+
+    const originalWindowAudioWorkletNode = (window as any).AudioWorkletNode;
+    const originalGlobalAudioWorkletNode = (globalThis as any).AudioWorkletNode;
+    (window as any).AudioWorkletNode = TrackingAudioWorkletNode;
+    (globalThis as any).AudioWorkletNode = TrackingAudioWorkletNode;
+
+    const { result } = renderHook(() => useAudio({ sendSampleRate: 16000 }));
+
+    let started = false;
+    await act(async () => {
+      started = await result.current.startManualAudioCapture();
+    });
+
+    expect(started).toBe(true);
+    expect(result.current.manualVoiceInputMode).toBe("audio-capture");
+    expect(result.current.inputStatus).toBe("active");
+
+    act(() => {
+      workletNodeInstance?.port.onmessage?.({
+        data: {
+          type: "audio-chunk",
+          pcmData: new Int16Array([256, -256, 512, -512]).buffer,
+          audioLevel: 0.72,
+        },
+      } as MessageEvent);
+    });
+
+    expect(result.current.audioLevel).toBe(0.72);
+
+    type ManualCaptureResult = {
+      mimeType: string;
+      sampleRate: number;
+      chunkCount: number;
+      bytes: number;
+      base64: string;
+    } | null;
+
+    let captured: ManualCaptureResult = null;
+    await act(async () => {
+      captured = (await result.current.stopManualAudioCapture()) as ManualCaptureResult;
+    });
+
+    expect(captured).not.toBeNull();
+    expect(captured?.mimeType).toBe("audio/wav");
+    expect(captured?.sampleRate).toBe(16000);
+    expect(captured?.chunkCount).toBe(1);
+    expect(captured?.bytes).toBeGreaterThan(44);
+    expect(result.current.inputStatus).toBe("idle");
+    expect(result.current.isManualListening).toBe(false);
+
+    const wavBytes = decodeBase64ToBytes(captured!.base64);
+    expect(String.fromCharCode(...wavBytes.slice(0, 4))).toBe("RIFF");
+    expect(String.fromCharCode(...wavBytes.slice(8, 12))).toBe("WAVE");
+    expect(sendDebugEventMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "audio.manual_capture_stopped",
+      }),
+    );
+
+    (window as any).AudioWorkletNode = originalWindowAudioWorkletNode;
+    (globalThis as any).AudioWorkletNode = originalGlobalAudioWorkletNode;
+  });
+
+  it("cancels manual audio capture without using SpeechRecognition", async () => {
+    setNavigatorUserAgent(
+      "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/147.0.0.0 Mobile Safari/537.36",
+      5,
+    );
+
+    const speechRecognitionConstructor = vi.fn();
+    (window as any).SpeechRecognition = speechRecognitionConstructor;
+
+    const stop = vi.fn();
+    getUserMediaMock().mockResolvedValue({
+      getTracks: vi.fn(() => [{ stop }]),
+      getAudioTracks: vi.fn(() => [{ stop }]),
+    });
+
+    const { result } = renderHook(() => useAudio());
+
+    await act(async () => {
+      await result.current.startManualAudioCapture();
+    });
+
+    act(() => {
+      result.current.cancelManualAudioCapture();
+    });
+
+    expect(speechRecognitionConstructor).not.toHaveBeenCalled();
+    expect(stop).toHaveBeenCalled();
+    expect(result.current.inputStatus).toBe("idle");
+    expect(sendDebugEventMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "audio.manual_capture_cancelled",
+      }),
+    );
   });
 
   it("resolves speech when speechSynthesis never emits onend", async () => {

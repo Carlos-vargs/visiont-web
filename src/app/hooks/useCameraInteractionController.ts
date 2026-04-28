@@ -50,6 +50,7 @@ type UseCameraInteractionControllerOptions = {
     prompt: string,
     imageMetadata?: GeminiImageMetadata,
   ) => Promise<GeminiResponse>;
+  transcribeAudio: (audioBase64: string, mimeType?: string) => Promise<string>;
   cancelActiveRequest: () => void;
 };
 
@@ -75,6 +76,7 @@ export function useCameraInteractionController({
   captureFrame,
   captureFrameData,
   sendImageWithPrompt,
+  transcribeAudio,
   cancelActiveRequest,
 }: UseCameraInteractionControllerOptions) {
   const [mode, setMode] = useState<CameraInteractionMode>("idle");
@@ -232,29 +234,51 @@ export function useCameraInteractionController({
         return;
       }
 
-      const recognitionStarted = audio.startManualRecognition();
+      if (audio.manualVoiceInputMode === "audio-capture") {
+        const audioStarted = await audio.startManualAudioCapture();
+        if (!isCurrentCycle(cycleId)) {
+          return;
+        }
 
-      if (!recognitionStarted) {
-        setErrorMessage(SPEECH_RECOGNITION_UNSUPPORTED_MESSAGE);
-        setStatusMessage("Analizando imagen sin transcripcion");
-        await executeAnalysis(undefined, cycleId);
-        return;
-      }
+        if (!audioStarted) {
+          const message = audio.hasKnownMicrophoneAccess
+            ? MICROPHONE_RECOVERY_MESSAGE
+            : audio.lastAudioError || "No pude abrir el microfono.";
+          setErrorMessage(message);
+          setModeState("error", "Toca para intentar de nuevo");
+          return;
+        }
 
-      const audioStarted = await audio.startListening();
-      if (!isCurrentCycle(cycleId)) {
-        return;
-      }
-
-      if (!audioStarted && audio.hasKnownMicrophoneAccess) {
-        setErrorMessage(MICROPHONE_RECOVERY_MESSAGE);
-        setStatusMessage("Escuchando sin medidor de volumen");
-      } else if (!audioStarted) {
-        setStatusMessage("Escuchando sin medidor de volumen");
-      } else if (audio.inputStatus !== "active") {
-        setStatusMessage("Escuchando sin medidor de volumen");
+        if (audio.inputStatus !== "active") {
+          setStatusMessage("Escuchando sin medidor de volumen");
+        } else {
+          setStatusMessage("Escuchando... Toca para analizar");
+        }
       } else {
-        setStatusMessage("Escuchando... Toca para analizar");
+        const recognitionStarted = audio.startManualRecognition();
+
+        if (!recognitionStarted) {
+          setErrorMessage(SPEECH_RECOGNITION_UNSUPPORTED_MESSAGE);
+          setStatusMessage("Analizando imagen sin transcripcion");
+          await executeAnalysis(undefined, cycleId);
+          return;
+        }
+
+        const audioStarted = await audio.startListening();
+        if (!isCurrentCycle(cycleId)) {
+          return;
+        }
+
+        if (!audioStarted && audio.hasKnownMicrophoneAccess) {
+          setErrorMessage(MICROPHONE_RECOVERY_MESSAGE);
+          setStatusMessage("Escuchando sin medidor de volumen");
+        } else if (!audioStarted) {
+          setStatusMessage("Escuchando sin medidor de volumen");
+        } else if (audio.inputStatus !== "active") {
+          setStatusMessage("Escuchando sin medidor de volumen");
+        } else {
+          setStatusMessage("Escuchando... Toca para analizar");
+        }
       }
 
       setModeState("listening");
@@ -273,6 +297,55 @@ export function useCameraInteractionController({
     cycleIdRef.current = cycleId;
 
     try {
+      if (audio.manualVoiceInputMode === "audio-capture") {
+        const capturedAudio = await audio.stopManualAudioCapture();
+        if (!isCurrentCycle(cycleId)) {
+          return;
+        }
+
+        let transcript = "";
+        if (capturedAudio?.base64) {
+          setModeState("analyzing", "Transcribiendo...");
+          try {
+            transcript = (
+              await transcribeAudio(
+                capturedAudio.base64,
+                capturedAudio.mimeType,
+              )
+            ).trim();
+          } catch (err: any) {
+            sendDebugEvent({
+              type: "camera_interaction.transcription_fallback",
+              source: "useCameraInteractionController",
+              level: "warn",
+              message: "Audio transcription failed; continuing with image-only analysis",
+              payload: {
+                error: err?.message || "unknown_error",
+              },
+            });
+          }
+        }
+
+        if (!transcript) {
+          setStatusMessage(
+            "No pude entender la instrucción de voz. Analizaré la imagen.",
+          );
+          sendDebugEvent({
+            type: "camera_interaction.transcription_fallback",
+            source: "useCameraInteractionController",
+            level: "warn",
+            message:
+              "Audio transcription was empty; continuing with image-only analysis",
+            payload: {
+              hadAudio: Boolean(capturedAudio?.base64),
+            },
+          });
+        }
+
+        await executeAnalysis(transcript || undefined, cycleId);
+        return;
+      }
+
       const capturedTranscript = audio.stopManualRecognition();
       audio.stopListening();
       const transcript = (capturedTranscript || audio.transcript).trim();
@@ -280,7 +353,7 @@ export function useCameraInteractionController({
     } finally {
       operationLockedRef.current = false;
     }
-  }, [audio, executeAnalysis]);
+  }, [audio, executeAnalysis, isCurrentCycle, setModeState, transcribeAudio]);
 
   const cancelCurrentInteraction = useCallback(async () => {
     if (modeRef.current === "cancelling") {
@@ -291,6 +364,7 @@ export function useCameraInteractionController({
     invalidateCurrentCycle();
     setModeState("cancelling", "Cancelando");
     setErrorMessage(null);
+    audio.cancelManualAudioCapture();
     audio.stopAllAudio("camera-interaction-cancelled");
 
     await audio.speakText("Cancelando");
@@ -322,6 +396,7 @@ export function useCameraInteractionController({
   const cleanup = useCallback(() => {
     operationLockedRef.current = false;
     invalidateCurrentCycle();
+    audio.cancelManualAudioCapture();
     audio.stopAllAudio("camera-unmount");
   }, [audio, invalidateCurrentCycle]);
 
