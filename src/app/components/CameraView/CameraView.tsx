@@ -185,7 +185,10 @@ export function CameraView() {
         </div>
 
         {/* Mic button and status message */}
-        <div className="flex w-full shrink-0 flex-col items-center px-4 pb-6 pt-2">
+        <div
+          onClick={handleMicPress}
+          className="flex w-full h-52 shrink-0 flex-col items-center justify-center px-4 pb-6 pt-2"
+        >
           <p style={{ fontSize: "12px" }} className="text-gray-400 mb-3">
             {statusMessage}
           </p>
@@ -193,7 +196,7 @@ export function CameraView() {
           <MicButton
             mode={micButtonMode}
             disabled={buttonDisabled}
-            onPress={handleMicPress}
+            onPress={() => {}}
           />
         </div>
 
